@@ -1,0 +1,8 @@
+This code is a work in progress intended to be used eventually in the
+MIT krb5 test suite, per:
+
+http://k5wiki.kerberos.org/wiki/Projects/Python_Kerberos_for_testing
+
+This code is not supported or stable.  The commit messages will not be
+terribly useful as the version control history will be discarded when
+the code is moved into the krb5 repository.
