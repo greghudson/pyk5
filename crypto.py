@@ -38,8 +38,6 @@
 #   - Cipher state only needed for kcmd suite
 #   - Nonstandard enctypes and cksumtypes like des-hmac-sha1
 
-import sys
-sys.path = ['/me/pycryptoinst/lib/python2.7/site-packages'] + sys.path
 from fractions import gcd
 from struct import pack, unpack
 from Crypto.Cipher import AES
@@ -129,8 +127,8 @@ def _nfold(str, nbytes):
 class _Enctype(object):
     # Base class for enctype profiles.  Usable enctype classes must define:
     #   * enctype: enctype number
-    #   * XXX do we need protocol key size?
-    #   * seedsize: random_to_key input size (in bytes) (XXX simplified only?)
+    #   * keysize: protocol size of key in bytes
+    #   * seedsize: random_to_key input size in bytes
     #   * random_to_key (if the keyspace is not dense)
     #   * string_to_key
     #   * encrypt
@@ -139,6 +137,8 @@ class _Enctype(object):
 
     @classmethod
     def random_to_key(cls, seed):
+        if len(seed) != cls.seedsize:
+            raise ValueError('Wrong seed length')
         return Key(cls.enctype, seed)
 
 
@@ -263,11 +263,13 @@ class _AESEnctype(_SimplifiedEnctype):
 
 class _AES128CTS(_AESEnctype):
     enctype = Enctypenum.AES128_CTS
+    keysize = 16
     seedsize = 16
 
 
 class _AES256CTS(_AESEnctype):
     enctype = Enctypenum.AES256_CTS
+    keysize = 32
     seedsize = 32
 
 
@@ -288,7 +290,8 @@ class _SimplifiedChecksum(_Checksum):
 
     @classmethod
     def checksum(cls, key, keyusage, text):
-        # NOTE: not checking key against cls.enc.enctype.
+        if key.enctype != cls.enc.enctype:
+            raise ValueError('Wrong key type for checksum')
         kc = cls.enc.derive(key, pack('>IB', keyusage, 0x99))
         hmac = HMAC.new(kc.contents, text, cls.enc.hashmod).digest()
         return hmac[:cls.macsize]
@@ -336,7 +339,9 @@ def _get_checksum_profile(cksumtype):
 
 class Key(object):
     def __init__(self, enctype, contents):
-        # NOTE: not checking length of contents against enctype.
+        e = _get_enctype_profile(enctype)
+        if len(contents) != e.keysize:
+            raise('Wrong key length')
         self.enctype = enctype
         self.contents = contents
 
