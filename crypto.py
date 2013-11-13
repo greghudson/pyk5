@@ -26,12 +26,12 @@
 # OF THE POSSIBILITY OF SUCH DAMAGE.
 
 # XXX current status:
-# * AES encryption, checksum, string2key done and tested
-#   - should be enough to start doing 4120 stuff
+# * Done and tested
+#   - AES encryption, checksum, string2key, prf
+#   - cf2 (needed for FAST)
 # * Still to do:
-#   - CF2 will be needed for FAST
 #   - DES3, RC4, DES enctypes and cksumtypes
-#   - Unkeyed checksum types
+#   - Unkeyed checksums
 #   - Special RC4, raw DES/DES3 operations for GSSAPI
 # * Difficult or low priority:
 #   - Camellia not supported by PyCrypto
@@ -383,11 +383,28 @@ def verify_checksum(cksumtype, key, keyusage, text, cksum):
     return c.verify(key, keyusage, text, cksum)
 
 
+def cf2(enctype, key1, key2, pepper1, pepper2):
+    # Combine two keys and two pepper strings to produce a result key
+    # of type enctype, using the RFC 6113 KRB-FX-CF2 function.
+    def prfplus(key, pepper, l):
+        # Produce l bytes of output using the RFC 6113 PRF+ function.
+        out = ''
+        count = 1
+        while len(out) < l:
+            out += prf(key, chr(count) + pepper)
+            count += 1
+        return out[:l]
+
+    e = _get_enctype_profile(enctype)
+    return e.random_to_key(_xorbytes(prfplus(key1, pepper1, e.seedsize),
+                                     prfplus(key2, pepper2, e.seedsize)))
+
+
 #####
 # XXX remove these tests later.
 
 def printhex(s):
-    print ''.join('\\x{0:02X}'.format(ord(c)) for c in s)
+    print ''.join('{0:02X}'.format(ord(c)) for c in s)
 
 #print 'encrypt AES128'
 #k=Key(17, '\x90\x62\x43\x0C\x8C\xDA\x33\x88\x92\x2E\x6D\x6A\x50\x9F\x5B\x7A')
@@ -437,20 +454,34 @@ def printhex(s):
 #print 's2k AES128'
 #k=string_to_key(17, 'password', 'ATHENA.MIT.EDUraeburn', '\0\0\0\2')
 #printhex(k.contents)
-## \xC6\x51\xBF\x29\xE2\x30\x0A\xC2\x7F\xA4\x69\xD6\x93\xBD\xDA\x13
+## C651BF29E2300AC27FA469D693BDDA13
 
 #print 's2k AES256'
 #k=string_to_key(18, 'X'*64, 'pass phrase equals block size', '\0\0\x04\xB0')
 #printhex(k.contents)
-## \x89\xAD\xEE\x36\x08\xDB\x8B\xC7\x1F\x1B\xFB\xFE\x45\x94\x86\xB0
-## \x56\x18\xB7\x0C\xBA\xE2\x20\x92\x53\x4E\x56\xC5\x53\xBA\x4B\x34
+## 89ADEE3608DB8BC71F1BFBFE459486B0
+## 5618B70CBAE22092534E56C553BA4B34
 
 #print 'prf AES128'
 #k=string_to_key(17, 'key1', 'key1')
 #printhex(prf(k, '\x01\x61'))
-## \x77\xB3\x9A\x37\xA8\x68\x92\x0F\x2A\x51\xF9\xDD\x15\x0C\x57\x17
+## 77B39A37A868920F2A51F9DD150C5717
 
 #print 'prf AES256'
 #k=string_to_key(18, 'key2', 'key2')
 #printhex(prf(k, '\x02\x62'))
-## \x0D\x67\x4D\xD0\xF9\xA6\x80\x65\x25\xA4\xD9\x2E\x82\x8B\xD1\x5A
+## 0D674DD0F9A6806525A4D92E828BD15A
+
+#print 'cf2 AES128'
+#k1=string_to_key(17, 'key1', 'key1')
+#k2=string_to_key(17, 'key2', 'key2')
+#k=cf2(17, k1, k2, 'a', 'b')
+#printhex(k.contents)
+## 97DF97E4B798B29EB31ED7280287A92A
+
+#print 'cf2 AES256'
+#k1=string_to_key(18, 'key1', 'key1')
+#k2=string_to_key(18, 'key2', 'key2')
+#k=cf2(18, k1, k2, 'a', 'b')
+#printhex(k.contents)
+## 4D6CA4E629785C1F01BAF55E2E548566B9617AE3A96868C337CB93B5E72B1C7B
