@@ -28,9 +28,8 @@
 # XXX current status:
 # * AES encryption, checksum, string2key done and tested
 #   - should be enough to start doing 4120 stuff
-# * PRF not done; will be needed for FAST
 # * Still to do:
-#   - PRF will be needed for FAST
+#   - CF2 will be needed for FAST
 #   - DES3, RC4, DES enctypes and cksumtypes
 #   - Unkeyed checksum types
 #   - Special RC4, raw DES/DES3 operations for GSSAPI
@@ -39,6 +38,8 @@
 #   - Cipher state only needed for kcmd suite
 #   - Nonstandard enctypes and cksumtypes like des-hmac-sha1
 
+import sys
+sys.path = ['/me/pycryptoinst/lib/python2.7/site-packages'] + sys.path
 from fractions import gcd
 from struct import pack, unpack
 from Crypto.Cipher import AES
@@ -134,6 +135,7 @@ class _Enctype(object):
     #   * string_to_key
     #   * encrypt
     #   * decrypt
+    #   * prf
 
     @classmethod
     def random_to_key(cls, seed):
@@ -142,7 +144,8 @@ class _Enctype(object):
 
 class _SimplifiedEnctype(_Enctype):
     # Base class for enctypes using the RFC 3961 simplified profile.
-    # Defines the encrypt and decrypt methods.  Subclasses must define:
+    # Defines the encrypt, decrypt, and prf methods.  Subclasses must
+    # define:
     #   * blocksize: Underlying cipher block size in bytes
     #   * padsize: Underlying cipher padding multiple (1 or blocksize)
     #   * macsize: Size of integrity MAC in bytes
@@ -191,10 +194,19 @@ class _SimplifiedEnctype(_Enctype):
         # Discard the confounder.
         return basic_plaintext[cls.blocksize:]
 
+    @classmethod
+    def prf(cls, key, string):
+        # Hash the input.  RFC 3961 says to truncate to the padding
+        # size, but implementations truncate to the block size.
+        hashval = cls.hashmod.new(string).digest()
+        truncated = hashval[:-(len(hashval) % cls.blocksize)]
+        # Encrypt the hash with a derived key.
+        kp = cls.derive(key, 'prf')
+        return cls.basic_encrypt(kp, truncated)
+
 
 class _AESEnctype(_SimplifiedEnctype):
     # Base class for aes128-cts and aes256-cts.
-    enctype = Enctypenum.AES256_CTS
     blocksize = 16
     padsize = 1
     macsize = 12
@@ -203,7 +215,6 @@ class _AESEnctype(_SimplifiedEnctype):
     @classmethod
     def string_to_key(cls, string, salt, params):
         (iterations,) = unpack('>L', params or '\x00\x00\x10\x00')
-        print repr(iterations)
         prf = lambda p, s: HMAC.new(p, s, SHA).digest()
         seed = PBKDF2(string, salt, cls.seedsize, iterations, prf)
         tkey = cls.random_to_key(seed)
@@ -251,10 +262,12 @@ class _AESEnctype(_SimplifiedEnctype):
 
 
 class _AES128CTS(_AESEnctype):
+    enctype = Enctypenum.AES128_CTS
     seedsize = 16
 
 
 class _AES256CTS(_AESEnctype):
+    enctype = Enctypenum.AES256_CTS
     seedsize = 32
 
 
@@ -350,6 +363,11 @@ def decrypt(key, keyusage, ciphertext):
     return e.decrypt(key, keyusage, ciphertext)
 
 
+def prf(key, string):
+    e = _get_enctype_profile(key.enctype)
+    return e.prf(key, string)
+
+
 def make_checksum(cksumtype, key, keyusage, text):
     c = _get_checksum_profile(cksumtype)
     return c.checksum(key, keyusage, text)
@@ -421,3 +439,13 @@ def printhex(s):
 #printhex(k.contents)
 ## \x89\xAD\xEE\x36\x08\xDB\x8B\xC7\x1F\x1B\xFB\xFE\x45\x94\x86\xB0
 ## \x56\x18\xB7\x0C\xBA\xE2\x20\x92\x53\x4E\x56\xC5\x53\xBA\x4B\x34
+
+#print 'prf AES128'
+#k=string_to_key(17, 'key1', 'key1')
+#printhex(prf(k, '\x01\x61'))
+## \x77\xB3\x9A\x37\xA8\x68\x92\x0F\x2A\x51\xF9\xDD\x15\x0C\x57\x17
+
+#print 'prf AES256'
+#k=string_to_key(18, 'key2', 'key2')
+#printhex(prf(k, '\x02\x62'))
+## \x0D\x67\x4D\xD0\xF9\xA6\x80\x65\x25\xA4\xD9\x2E\x82\x8B\xD1\x5A
