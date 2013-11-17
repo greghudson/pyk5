@@ -30,7 +30,7 @@
 #   - AES encryption, checksum, string2key, prf
 #   - cf2 (needed for FAST)
 # * Still to do:
-#   - DES3, RC4, DES enctypes and cksumtypes
+#   - RC4, DES enctypes and cksumtypes
 #   - Unkeyed checksums
 #   - Special RC4, raw DES/DES3 operations for GSSAPI
 # * Difficult or low priority:
@@ -40,14 +40,13 @@
 
 from fractions import gcd
 from struct import pack, unpack
-from Crypto.Cipher import AES
-from Crypto.Hash import HMAC
-from Crypto.Hash import SHA
+from Crypto.Cipher import AES, DES3
+from Crypto.Hash import HMAC, SHA
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 
 
-class Enctypenum(object):
+class Enctype(object):
     DES_CBC_CRC = 1
     DES_CBC_MD4 = 2
     DES_CBC_MD5 = 3
@@ -57,7 +56,7 @@ class Enctypenum(object):
     RC4_HMAC = 23
 
 
-class Checksumtypenum(object):
+class Cksumtype(object):
     CRC32 = 1
     MD4 = 2
     MD4_DES = 3
@@ -124,7 +123,26 @@ def _nfold(str, nbytes):
     return reduce(add_ones_complement, slices)
 
 
-class _Enctype(object):
+def _is_weak_des_key(keybytes):
+    return keybytes in ('\x01\x01\x01\x01\x01\x01\x01\x01',
+                        '\xFE\xFE\xFE\xFE\xFE\xFE\xFE\xFE',
+                        '\x1F\x1F\x1F\x1F\x0E\x0E\x0E\x0E',
+                        '\xE0\xE0\xE0\xE0\xF1\xF1\xF1\xF1',
+                        '\x01\xFE\x01\xFE\x01\xFE\x01\xFE',
+                        '\xFE\x01\xFE\x01\xFE\x01\xFE\x01',
+                        '\x1F\xE0\x1F\xE0\x0E\xF1\x0E\xF1',
+                        '\xE0\x1F\xE0\x1F\xF1\x0E\xF1\x0E',
+                        '\x01\xE0\x01\xE0\x01\xF1\x01\xF1',
+                        '\xE0\x01\xE0\x01\xF1\x01\xF1\x01',
+                        '\x1F\xFE\x1F\xFE\x0E\xFE\x0E\xFE',
+                        '\xFE\x1F\xFE\x1F\xFE\x0E\xFE\x0E',
+                        '\x01\x1F\x01\x1F\x01\x0E\x01\x0E',
+                        '\x1F\x01\x1F\x01\x0E\x01\x0E\x01',
+                        '\xE0\xFE\xE0\xFE\xF1\xFE\xF1\xFE',
+                        '\xFE\xE0\xFE\xE0\xFE\xF1\xFE\xF1')
+
+
+class _EnctypeProfile(object):
     # Base class for enctype profiles.  Usable enctype classes must define:
     #   * enctype: enctype number
     #   * keysize: protocol size of key in bytes
@@ -142,7 +160,7 @@ class _Enctype(object):
         return Key(cls.enctype, seed)
 
 
-class _SimplifiedEnctype(_Enctype):
+class _SimplifiedEnctype(_EnctypeProfile):
     # Base class for enctypes using the RFC 3961 simplified profile.
     # Defines the encrypt, decrypt, and prf methods.  Subclasses must
     # define:
@@ -160,7 +178,7 @@ class _SimplifiedEnctype(_Enctype):
         # than the block size as well, and n-folding when the length
         # is equal to the block size is a no-op.
         plaintext = _nfold(constant, cls.blocksize)
-        rndseed = ""
+        rndseed = ''
         while len(rndseed) < cls.seedsize:
             ciphertext = cls.basic_encrypt(key, plaintext)
             rndseed += ciphertext
@@ -205,6 +223,58 @@ class _SimplifiedEnctype(_Enctype):
         return cls.basic_encrypt(kp, truncated)
 
 
+class _DES3CBC(_SimplifiedEnctype):
+    enctype = Enctype.DES3_CBC
+    keysize = 24
+    seedsize = 21
+    blocksize = 8
+    padsize = 8
+    macsize = 20
+    hashmod = SHA
+
+    @classmethod
+    def random_to_key(cls, seed):
+        # XXX Maybe reframe as _DESEnctype.random_to_key and use that
+        # way from DES3 random-to-key when DES is implemented, since
+        # MIT does this instead of the RFC 3961 random-to-key.
+        def expand(seed):
+            def parity(b):
+                # Return b with the low-order bit set to yield odd parity.
+                b &= ~1
+                return b if bin(b & ~1).count('1') % 2 else b | 1
+            assert len(seed) == 7
+            firstbytes = [parity(ord(b) & ~1) for b in seed]
+            lastbyte = parity(sum((ord(seed[i])&1) << i+1 for i in xrange(7)))
+            keybytes = ''.join(chr(b) for b in firstbytes + [lastbyte])
+            if _is_weak_des_key(keybytes):
+                keybytes[7] = chr(ord(keybytes[7]) ^ 0xF0)
+            return keybytes
+        
+        if len(seed) != 21:
+            raise ValueError('Wrong seed length')
+        k1, k2, k3 = expand(seed[:7]), expand(seed[7:14]), expand(seed[14:])
+        return Key(cls.enctype, k1 + k2 + k3)
+
+    @classmethod
+    def string_to_key(cls, string, salt, params):
+        if params is not None and params != '':
+            raise ValueError('Invalid DES3 string-to-key parameters')
+        k = cls.random_to_key(_nfold(string + salt, 21))
+        return cls.derive(k, 'kerberos')
+
+    @classmethod
+    def basic_encrypt(cls, key, plaintext):
+        assert len(plaintext) % 8 == 0
+        des3 = DES3.new(key.contents, AES.MODE_CBC, '\0' * 8)
+        return des3.encrypt(plaintext)
+
+    @classmethod
+    def basic_decrypt(cls, key, ciphertext):
+        assert len(ciphertext) % 8 == 0
+        des3 = DES3.new(key.contents, AES.MODE_CBC, '\0' * 8)
+        return des3.decrypt(ciphertext)
+
+
 class _AESEnctype(_SimplifiedEnctype):
     # Base class for aes128-cts and aes256-cts.
     blocksize = 16
@@ -218,7 +288,7 @@ class _AESEnctype(_SimplifiedEnctype):
         prf = lambda p, s: HMAC.new(p, s, SHA).digest()
         seed = PBKDF2(string, salt, cls.seedsize, iterations, prf)
         tkey = cls.random_to_key(seed)
-        return cls.derive(tkey, "kerberos")
+        return cls.derive(tkey, 'kerberos')
 
     @classmethod
     def basic_encrypt(cls, key, plaintext):
@@ -262,18 +332,18 @@ class _AESEnctype(_SimplifiedEnctype):
 
 
 class _AES128CTS(_AESEnctype):
-    enctype = Enctypenum.AES128_CTS
+    enctype = Enctype.AES128_CTS
     keysize = 16
     seedsize = 16
 
 
 class _AES256CTS(_AESEnctype):
-    enctype = Enctypenum.AES256_CTS
+    enctype = Enctype.AES256_CTS
     keysize = 32
     seedsize = 32
 
 
-class _Checksum(object):
+class _ChecksumProfile(object):
     # Base class for checksum profiles.  Usable checksum classes must
     # define:
     #   * checksum
@@ -281,7 +351,7 @@ class _Checksum(object):
     pass
 
 
-class _SimplifiedChecksum(_Checksum):
+class _SimplifiedChecksum(_ChecksumProfile):
     # Base class for checksums using the RFC 3961 simplified profile.
     # Defines the checksum and verify methods.  Subclasses must
     # define:
@@ -313,15 +383,22 @@ class _SHA1AES256(_SimplifiedChecksum):
     enc = _AES256CTS
 
 
+class _SHA1DES3(_SimplifiedChecksum):
+    macsize = 20
+    enc = _DES3CBC
+
+
 _enctype_table = {
-    Enctypenum.AES128_CTS: _AES128CTS,
-    Enctypenum.AES256_CTS: _AES256CTS
+    Enctype.DES3_CBC: _DES3CBC,
+    Enctype.AES128_CTS: _AES128CTS,
+    Enctype.AES256_CTS: _AES256CTS
 }
 
 
 _checksum_table = {
-    Checksumtypenum.SHA1_AES128: _SHA1AES128,
-    Checksumtypenum.SHA1_AES256: _SHA1AES256
+    Cksumtype.SHA1_DES3: _SHA1DES3,
+    Cksumtype.SHA1_AES128: _SHA1AES128,
+    Cksumtype.SHA1_AES256: _SHA1AES256
 }
 
 
@@ -341,7 +418,7 @@ class Key(object):
     def __init__(self, enctype, contents):
         e = _get_enctype_profile(enctype)
         if len(contents) != e.keysize:
-            raise('Wrong key length')
+            raise ValueError('Wrong key length')
         self.enctype = enctype
         self.contents = contents
 
@@ -485,3 +562,41 @@ def printhex(s):
 #k=cf2(18, k1, k2, 'a', 'b')
 #printhex(k.contents)
 ## 4D6CA4E629785C1F01BAF55E2E548566B9617AE3A96868C337CB93B5E72B1C7B
+
+# print 's2k DES3'
+#k = string_to_key(16, 'password', 'ATHENA.MIT.EDUraeburn')
+#printhex(k.contents)
+## 850BB51358548CD05E86768C313E3BFEF7511937DCF72C3E
+
+#print 'encrypt AES128'
+#k=Key(16,
+#      '\x0D\xD5\x20\x94\xE0\xF4\x1C\xEC\xCB\x5B\xE5\x10\xA7\x64\xB3\x51'
+#      '\x76\xE3\x98\x13\x32\xF1\xE5\x98')
+#c=encrypt(k, 3, '13 bytes byte', '\x94\x69\x0A\x17\xB2\xDA\x3C\x9B')
+#printhex(c)
+
+#print 'decrypt DES3'
+#k=Key(16,
+#      '\x0D\xD5\x20\x94\xE0\xF4\x1C\xEC\xCB\x5B\xE5\x10\xA7\x64\xB3\x51'
+#      '\x76\xE3\x98\x13\x32\xF1\xE5\x98')
+#p=decrypt(k, 3,
+#          '\x83\x9A\x17\x08\x1E\xCB\xAF\xBC\xDC\x91\xB8\x8C\x69\x55\xDD\x3C'
+#          '\x45\x14\x02\x3C\xF1\x77\xB7\x7B\xF0\xD0\x17\x7A\x16\xF7\x05\xE8'
+#          '\x49\xCB\x77\x81\xD7\x6A\x31\x6B\x19\x3F\x8D\x30')
+#print p
+
+#print 'checksum SHA1DES3'
+#k=Key(16,
+#      '\x7A\x25\xDF\x89\x92\x29\x6D\xCE\xDA\x0E\x13\x5B\xC4\x04\x6E\x23'
+#      '\x75\xB3\xC1\x4C\x98\xFB\xC1\x62')
+#verify_checksum(12, k, 2, 'six seven',
+#                '\x0E\xEF\xC9\xC3\xE0\x49\xAA\xBC\x1B\xA5'
+#                '\xC4\x01\x67\x7D\x9A\xB6\x99\x08\x2B\xB4')
+
+#print 'cf2 DES3'
+#k1=string_to_key(16, 'key1', 'key1')
+#k2=string_to_key(16, 'key2', 'key2')
+#k=cf2(16, k1, k2, 'a', 'b')
+#printhex(k.contents)
+## E58F9EB643862C13AD38E529313462A7F73E62834FE54A01
+
