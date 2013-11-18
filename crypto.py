@@ -30,7 +30,8 @@
 #   - AES encryption, checksum, string2key, prf
 #   - cf2 (needed for FAST)
 # * Still to do:
-#   - RC4, DES enctypes and cksumtypes
+#   - DES enctypes and cksumtypes
+#   - RC4 exported enctype (if we need it for anything)
 #   - Unkeyed checksums
 #   - Special RC4, raw DES/DES3 operations for GSSAPI
 # * Difficult or low priority:
@@ -40,8 +41,8 @@
 
 from fractions import gcd
 from struct import pack, unpack
-from Crypto.Cipher import AES, DES3
-from Crypto.Hash import HMAC, SHA
+from Crypto.Cipher import AES, DES3, ARC4
+from Crypto.Hash import HMAC, MD4, MD5, SHA
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 
@@ -343,12 +344,68 @@ class _AES256CTS(_AESEnctype):
     seedsize = 32
 
 
+class _RC4(_EnctypeProfile):
+    enctype = Enctype.RC4_HMAC
+    keysize = 16
+    seedsize = 16
+
+    @staticmethod
+    def usage_str(keyusage):
+        # Return a four-byte string for an RFC 3961 keyusage, using
+        # the RFC 4757 rules.  Per the errata, do not map 9 to 8.
+        table = {3: 8, 23: 13}
+        msusage = table[keyusage] if keyusage in table else keyusage
+        return pack('<I', msusage)
+
+    @classmethod
+    def string_to_key(cls, string, salt, params):
+        utf16string = string.decode('UTF-8').encode('UTF-16LE')
+        return Key(cls.enctype, MD4.new(utf16string).digest())
+
+    @classmethod
+    def encrypt(cls, key, keyusage, plaintext, confounder):
+        if confounder is None:
+            confounder = get_random_bytes(8)
+        ki = HMAC.new(key.contents, cls.usage_str(keyusage), MD5).digest()
+        cksum = HMAC.new(ki, confounder + plaintext, MD5).digest()
+        ke = HMAC.new(ki, cksum, MD5).digest()
+        return cksum + ARC4.new(ke).encrypt(confounder + plaintext)
+
+    @classmethod
+    def decrypt(cls, key, keyusage, ciphertext):
+        if len(ciphertext) < 24:
+            raise ValueError('ciphertext too short')
+        cksum, basic_ctext = ciphertext[:16], ciphertext[16:]
+        ki = HMAC.new(key.contents, cls.usage_str(keyusage), MD5).digest()
+        ke = HMAC.new(ki, cksum, MD5).digest()
+        basic_plaintext = ARC4.new(ke).decrypt(basic_ctext)
+        exp_cksum = HMAC.new(ki, basic_plaintext, MD5).digest()
+        ok = _mac_equal(cksum, exp_cksum)
+        if not ok and keyusage == 9:
+            # Try again with usage 8, due to RFC 4757 errata.
+            ki = HMAC.new(key.contents, pack('<I', 8), MD5).digest()
+            exp_cksum = HMAC.new(ki, basic_plaintext, MD5).digest()
+            ok = _mac_equal(cksum, exp_cksum)
+        if not ok:
+            raise ValueError('ciphertext integrity failure')
+        # Discard the confounder.
+        return basic_plaintext[8:]
+
+    @classmethod
+    def prf(cls, key, string):
+        return HMAC.new(key.contents, string, SHA).digest()
+
+
 class _ChecksumProfile(object):
     # Base class for checksum profiles.  Usable checksum classes must
     # define:
     #   * checksum
-    #   * verify
-    pass
+    #   * verify (if verification is not just checksum-and-compare)
+    @classmethod
+    def verify(cls, key, keyusage, text, cksum):
+        expected = cls.checksum(key, keyusage, text)
+        if not _mac_equal(cksum, expected):
+            raise ValueError('checksum verification failure')
 
 
 class _SimplifiedChecksum(_ChecksumProfile):
@@ -366,12 +423,6 @@ class _SimplifiedChecksum(_ChecksumProfile):
         hmac = HMAC.new(kc.contents, text, cls.enc.hashmod).digest()
         return hmac[:cls.macsize]
 
-    @classmethod
-    def verify(cls, key, keyusage, text, cksum):
-        expected = cls.checksum(key, keyusage, text)
-        if not _mac_equal(cksum, expected):
-            raise ValueError('checksum verification failure')
-
 
 class _SHA1AES128(_SimplifiedChecksum):
     macsize = 12
@@ -388,17 +439,27 @@ class _SHA1DES3(_SimplifiedChecksum):
     enc = _DES3CBC
 
 
+class _HMACMD5(_ChecksumProfile):
+    @classmethod
+    def checksum(cls, key, keyusage, text):
+        ksign = HMAC.new(key.contents, 'signaturekey\0', MD5).digest()
+        md5hash = MD5.new(_RC4.usage_str(keyusage) + text).digest()
+        return HMAC.new(ksign, md5hash, MD5).digest()
+
+
 _enctype_table = {
     Enctype.DES3_CBC: _DES3CBC,
     Enctype.AES128_CTS: _AES128CTS,
-    Enctype.AES256_CTS: _AES256CTS
+    Enctype.AES256_CTS: _AES256CTS,
+    Enctype.RC4_HMAC: _RC4
 }
 
 
 _checksum_table = {
     Cksumtype.SHA1_DES3: _SHA1DES3,
     Cksumtype.SHA1_AES128: _SHA1AES128,
-    Cksumtype.SHA1_AES256: _SHA1AES256
+    Cksumtype.SHA1_AES256: _SHA1AES256,
+    Cksumtype.HMAC_MD5: _HMACMD5
 }
 
 
@@ -600,3 +661,35 @@ def printhex(s):
 #printhex(k.contents)
 ## E58F9EB643862C13AD38E529313462A7F73E62834FE54A01
 
+#print 's2k RC4'
+#k = string_to_key(23, 'foo', '')
+#printhex(k.contents)
+## AC8E657F83DF82BEEA5D43BDAF7800CC
+
+#print 'encrypt RC4'
+#k=Key(23, '\x68\xF2\x63\xDB\x3F\xCE\x15\xD0\x31\xC9\xEA\xB0\x2D\x67\x10\x7A')
+#c=encrypt(k, 4, '30 bytes bytes bytes bytes byt',
+#          '\x37\x24\x5E\x73\xA4\x5F\xBF\x72')
+#printhex(c)
+
+#print 'decrypt RC4'
+#k=Key(23, '\x68\xF2\x63\xDB\x3F\xCE\x15\xD0\x31\xC9\xEA\xB0\x2D\x67\x10\x7A')
+#p=decrypt(k, 4,
+#          '\x95\xF9\x04\x7C\x3A\xD7\x58\x91\xC2\xE9\xB0\x4B\x16\x56\x6D\xC8'
+#          '\xB6\xEB\x9C\xE4\x23\x1A\xFB\x25\x42\xEF\x87\xA7\xB5\xA0\xF2\x60'
+#          '\xA9\x9F\x04\x60\x50\x8D\xE0\xCE\xCC\x63\x2D\x07\xC3\x54\x12\x4E'
+#          '\x46\xC5\xD2\x23\x4E\xB8')
+#print p
+
+#print 'checksum HMACMD5'
+#k=Key(23, '\xF7\xD3\xA1\x55\xAF\x5E\x23\x8A\x0B\x7A\x87\x1A\x96\xBA\x2A\xB2')
+#verify_checksum(-138, k, 6, 'seventeen eighteen nineteen twenty',
+#                '\xEB\x38\xCC\x97\xE2\x23\x0F\x59'
+#                '\xDA\x41\x17\xDC\x58\x59\xD7\xEC')
+
+#print 'cf2 RC4'
+#k1=string_to_key(23, 'key1', 'key1')
+#k2=string_to_key(23, 'key2', 'key2')
+#k=cf2(23, k1, k2, 'a', 'b')
+#printhex(k.contents)
+## 24D7F6B6BAE4E5C00D2082C5EBAB3672
