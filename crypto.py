@@ -48,13 +48,13 @@ from Crypto.Random import get_random_bytes
 
 
 class Enctype(object):
-    DES_CBC_CRC = 1
-    DES_CBC_MD4 = 2
-    DES_CBC_MD5 = 3
-    DES3_CBC = 16
-    AES128_CTS = 17
-    AES256_CTS = 18
-    RC4_HMAC = 23
+    DES_CRC = 1
+    DES_MD4 = 2
+    DES_MD5 = 3
+    DES3 = 16
+    AES128 = 17
+    AES256 = 18
+    RC4 = 23
 
 
 class Cksumtype(object):
@@ -68,6 +68,10 @@ class Cksumtype(object):
     SHA1_AES128 = 15
     SHA1_AES256 = 16
     HMAC_MD5 = -138
+
+
+class InvalidChecksum(ValueError):
+    pass
 
 
 def _zeropad(s, padsize):
@@ -209,7 +213,7 @@ class _SimplifiedEnctype(_EnctypeProfile):
         hmac = HMAC.new(ki.contents, basic_plaintext, cls.hashmod).digest()
         expmac = hmac[:cls.macsize]
         if not _mac_equal(mac, expmac):
-            raise ValueError('ciphertext integrity failure')
+            raise InvalidChecksum('ciphertext integrity failure')
         # Discard the confounder.
         return basic_plaintext[cls.blocksize:]
 
@@ -225,7 +229,7 @@ class _SimplifiedEnctype(_EnctypeProfile):
 
 
 class _DES3CBC(_SimplifiedEnctype):
-    enctype = Enctype.DES3_CBC
+    enctype = Enctype.DES3
     keysize = 24
     seedsize = 21
     blocksize = 8
@@ -333,19 +337,19 @@ class _AESEnctype(_SimplifiedEnctype):
 
 
 class _AES128CTS(_AESEnctype):
-    enctype = Enctype.AES128_CTS
+    enctype = Enctype.AES128
     keysize = 16
     seedsize = 16
 
 
 class _AES256CTS(_AESEnctype):
-    enctype = Enctype.AES256_CTS
+    enctype = Enctype.AES256
     keysize = 32
     seedsize = 32
 
 
 class _RC4(_EnctypeProfile):
-    enctype = Enctype.RC4_HMAC
+    enctype = Enctype.RC4
     keysize = 16
     seedsize = 16
 
@@ -387,7 +391,7 @@ class _RC4(_EnctypeProfile):
             exp_cksum = HMAC.new(ki, basic_plaintext, MD5).digest()
             ok = _mac_equal(cksum, exp_cksum)
         if not ok:
-            raise ValueError('ciphertext integrity failure')
+            raise InvalidChecksum('ciphertext integrity failure')
         # Discard the confounder.
         return basic_plaintext[8:]
 
@@ -405,7 +409,7 @@ class _ChecksumProfile(object):
     def verify(cls, key, keyusage, text, cksum):
         expected = cls.checksum(key, keyusage, text)
         if not _mac_equal(cksum, expected):
-            raise ValueError('checksum verification failure')
+            raise InvalidChecksum('checksum verification failure')
 
 
 class _SimplifiedChecksum(_ChecksumProfile):
@@ -417,11 +421,15 @@ class _SimplifiedChecksum(_ChecksumProfile):
 
     @classmethod
     def checksum(cls, key, keyusage, text):
-        if key.enctype != cls.enc.enctype:
-            raise ValueError('Wrong key type for checksum')
         kc = cls.enc.derive(key, pack('>IB', keyusage, 0x99))
         hmac = HMAC.new(kc.contents, text, cls.enc.hashmod).digest()
         return hmac[:cls.macsize]
+
+    @classmethod
+    def verify(cls, key, keyusage, text, cksum):
+        if key.enctype != cls.enc.enctype:
+            raise ValueError('Wrong key type for checksum')
+        super(_SimplifiedChecksum, cls).verify(key, keyusage, text, cksum)
 
 
 class _SHA1AES128(_SimplifiedChecksum):
@@ -446,12 +454,18 @@ class _HMACMD5(_ChecksumProfile):
         md5hash = MD5.new(_RC4.usage_str(keyusage) + text).digest()
         return HMAC.new(ksign, md5hash, MD5).digest()
 
+    @classmethod
+    def verify(cls, key, keyusage, text, cksum):
+        if key.enctype != Enctype.RC4:
+            raise ValueError('Wrong key type for checksum')
+        super(_HMACMD5, cls).verify(key, keyusage, text, cksum)
+
 
 _enctype_table = {
-    Enctype.DES3_CBC: _DES3CBC,
-    Enctype.AES128_CTS: _AES128CTS,
-    Enctype.AES256_CTS: _AES256CTS,
-    Enctype.RC4_HMAC: _RC4
+    Enctype.DES3: _DES3CBC,
+    Enctype.AES128: _AES128CTS,
+    Enctype.AES256: _AES256CTS,
+    Enctype.RC4: _RC4
 }
 
 
@@ -502,6 +516,8 @@ def encrypt(key, keyusage, plaintext, confounder=None):
 
 
 def decrypt(key, keyusage, ciphertext):
+    # Throw InvalidChecksum on checksum failure.  Throw ValueError on
+    # invalid key enctype or malformed ciphertext.
     e = _get_enctype_profile(key.enctype)
     return e.decrypt(key, keyusage, ciphertext)
 
@@ -517,8 +533,11 @@ def make_checksum(cksumtype, key, keyusage, text):
 
 
 def verify_checksum(cksumtype, key, keyusage, text, cksum):
+    # Throw InvalidChecksum exception on checksum failure.  Throw
+    # ValueError on invalid cksumtype, invalid key enctype, or
+    # malformed checksum.
     c = _get_checksum_profile(cksumtype)
-    return c.verify(key, keyusage, text, cksum)
+    c.verify(key, keyusage, text, cksum)
 
 
 def cf2(enctype, key1, key2, pepper1, pepper2):
@@ -538,158 +557,149 @@ def cf2(enctype, key1, key2, pepper1, pepper2):
                                      prfplus(key2, pepper2, e.seedsize)))
 
 
-#####
-# XXX remove these tests later.
+if __name__ == '__main__':
+    def h(hexstr):
+        return hexstr.decode('hex')
 
-def printhex(s):
-    print ''.join('{0:02X}'.format(ord(c)) for c in s)
+    # AES128 encrypt and decrypt
+    kb = h('9062430C8CDA3388922E6D6A509F5B7A')
+    conf = h('94B491F481485B9A0678CD3C4EA386AD')
+    keyusage = 2
+    plain = '9 bytesss'
+    ctxt = h('68FB9679601F45C78857B2BF820FD6E53ECA8D42FD4B1D7024A09205ABB7CD2E'
+             'C26C355D2F')
+    k = Key(Enctype.AES128, kb)
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
 
-#print 'encrypt AES128'
-#k=Key(17, '\x90\x62\x43\x0C\x8C\xDA\x33\x88\x92\x2E\x6D\x6A\x50\x9F\x5B\x7A')
-#c=encrypt(k, 2, '9 bytesss',
-#          '\x94\xB4\x91\xF4\x81\x48\x5B\x9A\x06\x78\xCD\x3C\x4E\xA3\x86\xAD')
-#printhex(c)
+    # AES256 encrypt and decrypt
+    kb = h('F1C795E9248A09338D82C3F8D5B567040B0110736845041347235B1404231398')
+    conf = h('E45CA518B42E266AD98E165E706FFB60')
+    keyusage = 4
+    plain = '30 bytes bytes bytes bytes byt'
+    ctxt = h('D1137A4D634CFECE924DBC3BF6790648BD5CFF7DE0E7B99460211D0DAEF3D79A'
+             '295C688858F3B34B9CBD6EEBAE81DAF6B734D4D498B6714F1C1D')
+    k = Key(Enctype.AES256, kb)
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
 
-#print 'decrypt AES128'
-#k=Key(17, '\x90\x62\x43\x0C\x8C\xDA\x33\x88\x92\x2E\x6D\x6A\x50\x9F\x5B\x7A')
-#p=decrypt(k, 2,
-#          '\x68\xFB\x96\x79\x60\x1F\x45\xC7\x88\x57\xB2\xBF\x82\x0F\xD6\xE5'
-#          '\x3E\xCA\x8D\x42\xFD\x4B\x1D\x70\x24\xA0\x92\x05\xAB\xB7\xCD\x2E'
-#          '\xC2\x6C\x35\x5D\x2F')
-#print p
+    # AES128 checksum
+    kb = h('9062430C8CDA3388922E6D6A509F5B7A')
+    keyusage = 3
+    plain = 'eight nine ten eleven twelve thirteen'
+    cksum = h('01A4B088D45628F6946614E3')
+    k = Key(Enctype.AES128, kb)
+    verify_checksum(Cksumtype.SHA1_AES128, k, keyusage, plain, cksum)
 
-#print 'encrypt AES256'
-#k=Key(18,
-#      '\xF1\xC7\x95\xE9\x24\x8A\x09\x33\x8D\x82\xC3\xF8\xD5\xB5\x67\x04'
-#      '\x0B\x01\x10\x73\x68\x45\x04\x13\x47\x23\x5B\x14\x04\x23\x13\x98')
-#c=encrypt(k, 4, '30 bytes bytes bytes bytes byt',
-#          '\xE4\x5C\xA5\x18\xB4\x2E\x26\x6A\xD9\x8E\x16\x5E\x70\x6F\xFB\x60')
-#printhex(c)
+    # AES256 checksum
+    kb = h('B1AE4CD8462AFF1677053CC9279AAC30B796FB81CE21474DD3DDBCFEA4EC76D7')
+    keyusage = 4
+    plain = 'fourteen'
+    cksum = h('E08739E3279E2903EC8E3836')
+    k = Key(Enctype.AES256, kb)
+    verify_checksum(Cksumtype.SHA1_AES256, k, keyusage, plain, cksum)
 
-#print 'decrypt AES256'
-#k=Key(18,
-#      '\xF1\xC7\x95\xE9\x24\x8A\x09\x33\x8D\x82\xC3\xF8\xD5\xB5\x67\x04'
-#      '\x0B\x01\x10\x73\x68\x45\x04\x13\x47\x23\x5B\x14\x04\x23\x13\x98')
-#p=decrypt(k, 4,
-#          '\xD1\x13\x7A\x4D\x63\x4C\xFE\xCE\x92\x4D\xBC\x3B\xF6\x79\x06\x48'
-#          '\xBD\x5C\xFF\x7D\xE0\xE7\xB9\x94\x60\x21\x1D\x0D\xAE\xF3\xD7\x9A'
-#          '\x29\x5C\x68\x88\x58\xF3\xB3\x4B\x9C\xBD\x6E\xEB\xAE\x81\xDA\xF6'
-#          '\xB7\x34\xD4\xD4\x98\xB6\x71\x4F\x1C\x1D')
-#print p
+    # AES128 string-to-key
+    string = 'password'
+    salt = 'ATHENA.MIT.EDUraeburn'
+    params = h('00000002')
+    kb = h('C651BF29E2300AC27FA469D693BDDA13')
+    k = string_to_key(Enctype.AES128, string, salt, params)
+    assert(k.contents == kb)
 
-#print 'checksum SHA1AES128'
-#k=Key(17, '\x90\x62\x43\x0C\x8C\xDA\x33\x88\x92\x2E\x6D\x6A\x50\x9F\x5B\x7A')
-#verify_checksum(15, k, 3, 'eight nine ten eleven twelve thirteen',
-#                '\x01\xA4\xB0\x88\xD4\x56\x28\xF6\x94\x66\x14\xE3')
+    # AES256 string-to-key
+    string = 'X' * 64
+    salt = 'pass phrase equals block size'
+    params = h('000004B0')
+    kb = h('89ADEE3608DB8BC71F1BFBFE459486B05618B70CBAE22092534E56C553BA4B34')
+    k = string_to_key(Enctype.AES256, string, salt, params)
+    assert(k.contents == kb)
 
-#print 'checksum SHA1AES256'
-#k=Key(18,
-#      '\xB1\xAE\x4C\xD8\x46\x2A\xFF\x16\x77\x05\x3C\xC9\x27\x9A\xAC\x30'
-#      '\xB7\x96\xFB\x81\xCE\x21\x47\x4D\xD3\xDD\xBC\xFE\xA4\xEC\x76\xD7')
-#verify_checksum(16, k, 4, 'fourteen',
-#                '\xE0\x87\x39\xE3\x27\x9E\x29\x03\xEC\x8E\x38\x36')
+    # AES128 prf
+    kb = h('77B39A37A868920F2A51F9DD150C5717')
+    k = string_to_key(Enctype.AES128, 'key1', 'key1')
+    assert(prf(k, '\x01\x61') == kb)
 
-#print 's2k AES128'
-#k=string_to_key(17, 'password', 'ATHENA.MIT.EDUraeburn', '\0\0\0\2')
-#printhex(k.contents)
-## C651BF29E2300AC27FA469D693BDDA13
+    # AES256 prf
+    kb = h('0D674DD0F9A6806525A4D92E828BD15A')
+    k = string_to_key(Enctype.AES256, 'key2', 'key2')
+    assert(prf(k, '\x02\x62') == kb)
 
-#print 's2k AES256'
-#k=string_to_key(18, 'X'*64, 'pass phrase equals block size', '\0\0\x04\xB0')
-#printhex(k.contents)
-## 89ADEE3608DB8BC71F1BFBFE459486B0
-## 5618B70CBAE22092534E56C553BA4B34
+    # AES128 cf2
+    kb = h('97DF97E4B798B29EB31ED7280287A92A')
+    k1 = string_to_key(Enctype.AES128, 'key1', 'key1')
+    k2 = string_to_key(Enctype.AES128, 'key2', 'key2')
+    k = cf2(Enctype.AES128, k1, k2, 'a', 'b')
+    assert(k.contents == kb)
 
-#print 'prf AES128'
-#k=string_to_key(17, 'key1', 'key1')
-#printhex(prf(k, '\x01\x61'))
-## 77B39A37A868920F2A51F9DD150C5717
+    # AES256 cf2
+    kb = h('4D6CA4E629785C1F01BAF55E2E548566B9617AE3A96868C337CB93B5E72B1C7B')
+    k1 = string_to_key(Enctype.AES256, 'key1', 'key1')
+    k2 = string_to_key(Enctype.AES256, 'key2', 'key2')
+    k = cf2(Enctype.AES256, k1, k2, 'a', 'b')
+    assert(k.contents == kb)
 
-#print 'prf AES256'
-#k=string_to_key(18, 'key2', 'key2')
-#printhex(prf(k, '\x02\x62'))
-## 0D674DD0F9A6806525A4D92E828BD15A
+    # DES3 encrypt and decrypt
+    kb = h('0DD52094E0F41CECCB5BE510A764B35176E3981332F1E598')
+    conf = h('94690A17B2DA3C9B')
+    keyusage = 3
+    plain = '13 bytes byte'
+    ctxt = h('839A17081ECBAFBCDC91B88C6955DD3C4514023CF177B77BF0D0177A16F705E8'
+             '49CB7781D76A316B193F8D30')
+    k = Key(Enctype.DES3, kb)
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == _zeropad(plain, 8))
 
-#print 'cf2 AES128'
-#k1=string_to_key(17, 'key1', 'key1')
-#k2=string_to_key(17, 'key2', 'key2')
-#k=cf2(17, k1, k2, 'a', 'b')
-#printhex(k.contents)
-## 97DF97E4B798B29EB31ED7280287A92A
+    # DES3 string-to-key
+    string = 'password'
+    salt = 'ATHENA.MIT.EDUraeburn'
+    kb = h('850BB51358548CD05E86768C313E3BFEF7511937DCF72C3E')
+    k = string_to_key(Enctype.DES3, string, salt)
+    assert(k.contents == kb)
 
-#print 'cf2 AES256'
-#k1=string_to_key(18, 'key1', 'key1')
-#k2=string_to_key(18, 'key2', 'key2')
-#k=cf2(18, k1, k2, 'a', 'b')
-#printhex(k.contents)
-## 4D6CA4E629785C1F01BAF55E2E548566B9617AE3A96868C337CB93B5E72B1C7B
+    # DES3 checksum
+    kb = h('7A25DF8992296DCEDA0E135BC4046E2375B3C14C98FBC162')
+    keyusage = 2
+    plain = 'six seven'
+    cksum = h('0EEFC9C3E049AABC1BA5C401677D9AB699082BB4')
+    k = Key(Enctype.DES3, kb)
+    verify_checksum(Cksumtype.SHA1_DES3, k, keyusage, plain, cksum)
 
-# print 's2k DES3'
-#k = string_to_key(16, 'password', 'ATHENA.MIT.EDUraeburn')
-#printhex(k.contents)
-## 850BB51358548CD05E86768C313E3BFEF7511937DCF72C3E
+    # DES3 cf2
+    kb = h('E58F9EB643862C13AD38E529313462A7F73E62834FE54A01')
+    k1 = string_to_key(Enctype.DES3, 'key1', 'key1')
+    k2 = string_to_key(Enctype.DES3, 'key2', 'key2')
+    k = cf2(Enctype.DES3, k1, k2, 'a', 'b')
+    assert(k.contents == kb)
 
-#print 'encrypt AES128'
-#k=Key(16,
-#      '\x0D\xD5\x20\x94\xE0\xF4\x1C\xEC\xCB\x5B\xE5\x10\xA7\x64\xB3\x51'
-#      '\x76\xE3\x98\x13\x32\xF1\xE5\x98')
-#c=encrypt(k, 3, '13 bytes byte', '\x94\x69\x0A\x17\xB2\xDA\x3C\x9B')
-#printhex(c)
+    # RC4 encrypt and decrypt
+    kb = h('68F263DB3FCE15D031C9EAB02D67107A')
+    conf = h('37245E73A45FBF72')
+    keyusage = 4
+    plain = '30 bytes bytes bytes bytes byt'
+    ctxt = h('95F9047C3AD75891C2E9B04B16566DC8B6EB9CE4231AFB2542EF87A7B5A0F260'
+             'A99F0460508DE0CECC632D07C354124E46C5D2234EB8')
+    k = Key(Enctype.RC4, kb)
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
 
-#print 'decrypt DES3'
-#k=Key(16,
-#      '\x0D\xD5\x20\x94\xE0\xF4\x1C\xEC\xCB\x5B\xE5\x10\xA7\x64\xB3\x51'
-#      '\x76\xE3\x98\x13\x32\xF1\xE5\x98')
-#p=decrypt(k, 3,
-#          '\x83\x9A\x17\x08\x1E\xCB\xAF\xBC\xDC\x91\xB8\x8C\x69\x55\xDD\x3C'
-#          '\x45\x14\x02\x3C\xF1\x77\xB7\x7B\xF0\xD0\x17\x7A\x16\xF7\x05\xE8'
-#          '\x49\xCB\x77\x81\xD7\x6A\x31\x6B\x19\x3F\x8D\x30')
-#print p
+    # RC4 string-to-key
+    string = 'foo'
+    kb = h('AC8E657F83DF82BEEA5D43BDAF7800CC')
+    k = string_to_key(Enctype.RC4, string, None)
+    assert(k.contents == kb)
 
-#print 'checksum SHA1DES3'
-#k=Key(16,
-#      '\x7A\x25\xDF\x89\x92\x29\x6D\xCE\xDA\x0E\x13\x5B\xC4\x04\x6E\x23'
-#      '\x75\xB3\xC1\x4C\x98\xFB\xC1\x62')
-#verify_checksum(12, k, 2, 'six seven',
-#                '\x0E\xEF\xC9\xC3\xE0\x49\xAA\xBC\x1B\xA5'
-#                '\xC4\x01\x67\x7D\x9A\xB6\x99\x08\x2B\xB4')
+    # RC4 checksum
+    kb = h('F7D3A155AF5E238A0B7A871A96BA2AB2')
+    keyusage = 6
+    plain = 'seventeen eighteen nineteen twenty'
+    cksum = h('EB38CC97E2230F59DA4117DC5859D7EC')
+    k = Key(Enctype.RC4, kb)
+    verify_checksum(Cksumtype.HMAC_MD5, k, keyusage, plain, cksum)
 
-#print 'cf2 DES3'
-#k1=string_to_key(16, 'key1', 'key1')
-#k2=string_to_key(16, 'key2', 'key2')
-#k=cf2(16, k1, k2, 'a', 'b')
-#printhex(k.contents)
-## E58F9EB643862C13AD38E529313462A7F73E62834FE54A01
-
-#print 's2k RC4'
-#k = string_to_key(23, 'foo', '')
-#printhex(k.contents)
-## AC8E657F83DF82BEEA5D43BDAF7800CC
-
-#print 'encrypt RC4'
-#k=Key(23, '\x68\xF2\x63\xDB\x3F\xCE\x15\xD0\x31\xC9\xEA\xB0\x2D\x67\x10\x7A')
-#c=encrypt(k, 4, '30 bytes bytes bytes bytes byt',
-#          '\x37\x24\x5E\x73\xA4\x5F\xBF\x72')
-#printhex(c)
-
-#print 'decrypt RC4'
-#k=Key(23, '\x68\xF2\x63\xDB\x3F\xCE\x15\xD0\x31\xC9\xEA\xB0\x2D\x67\x10\x7A')
-#p=decrypt(k, 4,
-#          '\x95\xF9\x04\x7C\x3A\xD7\x58\x91\xC2\xE9\xB0\x4B\x16\x56\x6D\xC8'
-#          '\xB6\xEB\x9C\xE4\x23\x1A\xFB\x25\x42\xEF\x87\xA7\xB5\xA0\xF2\x60'
-#          '\xA9\x9F\x04\x60\x50\x8D\xE0\xCE\xCC\x63\x2D\x07\xC3\x54\x12\x4E'
-#          '\x46\xC5\xD2\x23\x4E\xB8')
-#print p
-
-#print 'checksum HMACMD5'
-#k=Key(23, '\xF7\xD3\xA1\x55\xAF\x5E\x23\x8A\x0B\x7A\x87\x1A\x96\xBA\x2A\xB2')
-#verify_checksum(-138, k, 6, 'seventeen eighteen nineteen twenty',
-#                '\xEB\x38\xCC\x97\xE2\x23\x0F\x59'
-#                '\xDA\x41\x17\xDC\x58\x59\xD7\xEC')
-
-#print 'cf2 RC4'
-#k1=string_to_key(23, 'key1', 'key1')
-#k2=string_to_key(23, 'key2', 'key2')
-#k=cf2(23, k1, k2, 'a', 'b')
-#printhex(k.contents)
-## 24D7F6B6BAE4E5C00D2082C5EBAB3672
+    # RC4 cf2
+    kb = h('24D7F6B6BAE4E5C00D2082C5EBAB3672')
+    k1 = string_to_key(Enctype.RC4, 'key1', 'key1')
+    k2 = string_to_key(Enctype.RC4, 'key2', 'key2')
+    k = cf2(Enctype.RC4, k1, k2, 'a', 'b')
+    assert(k.contents == kb)
