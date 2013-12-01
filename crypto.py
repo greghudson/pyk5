@@ -1,3 +1,4 @@
+# Copyright (C) 2013 by the Massachusetts Institute of Technology.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
