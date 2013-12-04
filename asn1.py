@@ -105,7 +105,7 @@ class _K5Sequence(Sequence):
     # containing sequence as they should.  Treat interior objects as
     # immutable once they are assigned to a containing sequence, at
     # least until you are done using the containing sequence.
-    def setComponentByPosition(self, idx, value=None, verifyConstraints=True):
+    def setComponentByPosition(self, idx, value=None, *rest, **kw):
         if isinstance(value, base.Asn1Item):
             ftags = self._componentType.getTypeByPosition(idx).getTagSet()
             vtags = value.getTagSet()
@@ -118,8 +118,7 @@ class _K5Sequence(Sequence):
                     value = value.clone(tagSet=ftags, cloneValueFlag=True)
                 else:
                     value = value.clone(tagSet=ftags)
-        return Sequence.setComponentByPosition(self, idx, value,
-                                               verifyConstraints)
+        return Sequence.setComponentByPosition(self, idx, value, *rest, **kw)
 
 
 class PrincipalName(_K5Sequence):
