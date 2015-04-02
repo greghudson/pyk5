@@ -43,7 +43,7 @@
 from fractions import gcd
 from struct import pack, unpack
 from Crypto.Cipher import AES, DES3, ARC4
-from Crypto.Hash import HMAC, MD4, MD5, SHA
+from Crypto.Hash import HMAC, MD4, MD5, SHA, SHA256, SHA384
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 
@@ -56,6 +56,8 @@ class Enctype(object):
     AES128 = 17
     AES256 = 18
     RC4 = 23
+    AES128_SHA256 = -1000
+    AES256_SHA384 = -1001
 
 
 class Cksumtype(object):
@@ -69,6 +71,8 @@ class Cksumtype(object):
     SHA1_AES128 = 15
     SHA1_AES256 = 16
     HMAC_MD5 = -138
+    SHA256_AES128 = -1000
+    SHA384_AES256 = -1001
 
 
 class InvalidChecksum(ValueError):
@@ -146,6 +150,56 @@ def _is_weak_des_key(keybytes):
                         '\x1F\x01\x1F\x01\x0E\x01\x0E\x01',
                         '\xE0\xFE\xE0\xFE\xF1\xFE\xF1\xFE',
                         '\xFE\xE0\xFE\xE0\xFE\xF1\xFE\xF1')
+
+
+def _cts_encrypt(encmod, keybytes, plaintext):
+    # Encrypt plaintext using the CBC-CS3 cipher mode and the block
+    # cipher given by encmod.
+    bsize = encmod.block_size
+    assert len(plaintext) >= bsize
+    cipher = encmod.new(keybytes, encmod.MODE_CBC, '\0' * bsize)
+    ctext = cipher.encrypt(_zeropad(plaintext, bsize))
+    if len(plaintext) > bsize:
+        # Swap the last two ciphertext blocks and truncate the
+        # final block to match the plaintext length.
+        lastlen = len(plaintext) % bsize or bsize
+        ctext = (ctext[:-(bsize*2)] + ctext[-bsize:] +
+                 ctext[-(bsize*2):-bsize][:lastlen])
+    return ctext
+
+
+def _cts_decrypt(encmod, keybytes, ctext):
+    # Decrypt ctext using the CBC-CS3 cipher mode and the block cipher
+    # given by encmod.
+    bsize = encmod.block_size
+    assert len(ctext) >= bsize
+    cipher = encmod.new(keybytes, encmod.MODE_ECB)
+    if len(ctext) == bsize:
+        return cipher.decrypt(ctext)
+
+    # Split ctext into blocks.  The last block may be partial.
+    cblocks = [ctext[p:p+bsize] for p in xrange(0, len(ctext), bsize)]
+    lastlen = len(cblocks[-1])
+
+    # CBC-decrypt all but the last two blocks.
+    prev_cblock = '\0' * bsize
+    plaintext = ''
+    for b in cblocks[:-2]:
+        plaintext += _xorbytes(cipher.decrypt(b), prev_cblock)
+        prev_cblock = b
+
+    # Decrypt the second-to-last cipher block.  The left side of the
+    # decrypted block will be the final block of plaintext xor'd with
+    # the final partial cipher block; the right side will be the
+    # omitted bytes of ctext from the final block.
+    b = cipher.decrypt(cblocks[-2])
+    lastplaintext =_xorbytes(b[:lastlen], cblocks[-1])
+    omitted = b[lastlen:]
+
+    # Decrypt the final cipher block plus the omitted bytes to get the
+    # second-to-last plaintext block.
+    plaintext += _xorbytes(cipher.decrypt(cblocks[-1] + omitted), prev_cblock)
+    return plaintext + lastplaintext
 
 
 class _EnctypeProfile(object):
@@ -298,43 +352,11 @@ class _AESEnctype(_SimplifiedEnctype):
 
     @classmethod
     def basic_encrypt(cls, key, plaintext):
-        assert len(plaintext) >= 16
-        aes = AES.new(key.contents, AES.MODE_CBC, '\0' * 16)
-        ctext = aes.encrypt(_zeropad(plaintext, 16))
-        if len(plaintext) > 16:
-            # Swap the last two ciphertext blocks and truncate the
-            # final block to match the plaintext length.
-            lastlen = len(plaintext) % 16 or 16
-            ctext = ctext[:-32] + ctext[-16:] + ctext[-32:-16][:lastlen]
-        return ctext
+        return _cts_encrypt(AES, key.contents, plaintext)
 
     @classmethod
     def basic_decrypt(cls, key, ciphertext):
-        assert len(ciphertext) >= 16
-        aes = AES.new(key.contents, AES.MODE_ECB)
-        if len(ciphertext) == 16:
-            return aes.decrypt(ciphertext)
-        # Split the ciphertext into blocks.  The last block may be partial.
-        cblocks = [ciphertext[p:p+16] for p in xrange(0, len(ciphertext), 16)]
-        lastlen = len(cblocks[-1])
-        # CBC-decrypt all but the last two blocks.
-        prev_cblock = '\0' * 16
-        plaintext = ''
-        for b in cblocks[:-2]:
-            plaintext += _xorbytes(aes.decrypt(b), prev_cblock)
-            prev_cblock = b
-        # Decrypt the second-to-last cipher block.  The left side of
-        # the decrypted block will be the final block of plaintext
-        # xor'd with the final partial cipher block; the right side
-        # will be the omitted bytes of ciphertext from the final
-        # block.
-        b = aes.decrypt(cblocks[-2])
-        lastplaintext =_xorbytes(b[:lastlen], cblocks[-1])
-        omitted = b[lastlen:]
-        # Decrypt the final cipher block plus the omitted bytes to get
-        # the second-to-last plaintext block.
-        plaintext += _xorbytes(aes.decrypt(cblocks[-1] + omitted), prev_cblock)
-        return plaintext + lastplaintext
+        return _cts_decrypt(AES, key.contents, ciphertext)
 
 
 class _AES128CTS(_AESEnctype):
@@ -347,6 +369,87 @@ class _AES256CTS(_AESEnctype):
     enctype = Enctype.AES256
     keysize = 32
     seedsize = 32
+
+
+class _AES2Enctype(_EnctypeProfile):
+    # Base class for aes128-cts-hmac-sha256-128 and
+    # aes256-cts-hmac-sha384-192.  Subclasses must define:
+    #   * enctype_name: used in string-to-key
+    #   * enctype: enctype number
+    #   * keysize: protocol size of key in bytes
+    #   * seedsize: random_to_key input size in bytes (same as keysize)
+    #   * macsize: size of integrity tag (also size of Ki, Ke)
+    #   * prfsize: size of PRF output
+    #   * hashmod: PyCrypto hash module for underlying hash function
+
+    # Derive an AES or HMAC key of length keylen (in bytes) using the
+    # NIST SP800-108 section 5.1 KDF with HMAC as the PRF.  Return the
+    # raw key contents as a string.
+    @classmethod
+    def derive_bytes(cls, key, keylen, label, context=''):
+        lenbytes = pack('>I', keylen * 8)
+        m = '\x00\x00\x00\x01' + label + '\0' + context + lenbytes
+        hmac = HMAC.new(key.contents, m, cls.hashmod).digest()
+        return hmac[0:keylen]
+
+    @classmethod
+    def encrypt(cls, key, keyusage, plaintext, confounder):
+        ki = cls.derive_bytes(key, cls.macsize, pack('>IB', keyusage, 0x55))
+        ke = cls.derive_bytes(key, cls.keysize, pack('>IB', keyusage, 0xAA))
+        if confounder is None:
+            confounder = get_random_bytes(16)
+        ctext = _cts_encrypt(AES, ke, confounder + plaintext)
+        hmac = HMAC.new(ki, '\0' * 16 + ctext, cls.hashmod).digest()
+        return ctext + hmac[:cls.macsize]
+
+    @classmethod
+    def decrypt(cls, key, keyusage, ciphertext):
+        ki = cls.derive_bytes(key, cls.macsize, pack('>IB', keyusage, 0x55))
+        ke = cls.derive_bytes(key, cls.keysize, pack('>IB', keyusage, 0xAA))
+        if len(ciphertext) < 16 + cls.macsize:
+            raise ValueError('ciphertext too short')
+        basic_ctext, mac = ciphertext[:-cls.macsize], ciphertext[-cls.macsize:]
+        hmac = HMAC.new(ki, '\0' * 16 + basic_ctext, cls.hashmod).digest()
+        expmac = hmac[:cls.macsize]
+        if not _mac_equal(mac, expmac):
+            raise InvalidChecksum('ciphertext integrity failure')
+        basic_plaintext = _cts_decrypt(AES, ke, basic_ctext)
+        # Discard the confounder.
+        return basic_plaintext[16:]
+
+    @classmethod
+    def prf(cls, key, string):
+        return cls.derive_bytes(key, cls.prfsize, 'prf', string)
+
+    @classmethod
+    def string_to_key(cls, string, salt, params):
+        (iterations,) = unpack('>L', params or '\x00\x00\x80\x00')
+        prf = lambda p, s: HMAC.new(p, s, cls.hashmod).digest()
+        etsalt = cls.enctype_name + '\0' + salt
+        seed = PBKDF2(string, etsalt, cls.seedsize, iterations, prf)
+        tkey = cls.random_to_key(seed)
+        keybytes = cls.derive_bytes(tkey, cls.seedsize, 'kerberos')
+        return cls.random_to_key(keybytes)
+
+
+class _AES128CTS_SHA256(_AES2Enctype):
+    enctype_name = "aes128-cts-hmac-sha256-128"
+    enctype = Enctype.AES128_SHA256
+    keysize = 16
+    seedsize = 16
+    macsize = 16
+    prfsize = 32
+    hashmod = SHA256
+
+
+class _AES256CTS_SHA384(_AES2Enctype):
+    enctype_name = "aes256-cts-hmac-sha384-192"
+    enctype = Enctype.AES256_SHA384
+    keysize = 32
+    seedsize = 32
+    macsize = 24
+    prfsize = 48
+    hashmod = SHA384
 
 
 class _RC4(_EnctypeProfile):
@@ -448,6 +551,29 @@ class _SHA1DES3(_SimplifiedChecksum):
     enc = _DES3CBC
 
 
+class _AES2Checksum(_ChecksumProfile):
+    @classmethod
+    def checksum(cls, key, keyusage, text):
+        kc = cls.enc.derive_bytes(key, cls.enc.macsize,
+                                  pack('>IB', keyusage, 0x99))
+        hmac = HMAC.new(kc, text, cls.enc.hashmod).digest()
+        return hmac[:cls.enc.macsize]
+    
+    @classmethod
+    def verify(cls, key, keyusage, text, cksum):
+        if key.enctype != cls.enc.enctype:
+            raise ValueError('Wrong key type for checksum')
+        super(_AES2Checksum, cls).verify(key, keyusage, text, cksum)
+
+
+class _SHA256AES128(_AES2Checksum):
+    enc = _AES128CTS_SHA256
+
+
+class _SHA384AES256(_AES2Checksum):
+    enc = _AES256CTS_SHA384
+
+
 class _HMACMD5(_ChecksumProfile):
     @classmethod
     def checksum(cls, key, keyusage, text):
@@ -466,6 +592,8 @@ _enctype_table = {
     Enctype.DES3: _DES3CBC,
     Enctype.AES128: _AES128CTS,
     Enctype.AES256: _AES256CTS,
+    Enctype.AES128_SHA256: _AES128CTS_SHA256,
+    Enctype.AES256_SHA384: _AES256CTS_SHA384,
     Enctype.RC4: _RC4
 }
 
@@ -474,6 +602,8 @@ _checksum_table = {
     Cksumtype.SHA1_DES3: _SHA1DES3,
     Cksumtype.SHA1_AES128: _SHA1AES128,
     Cksumtype.SHA1_AES256: _SHA1AES256,
+    Cksumtype.SHA256_AES128: _SHA256AES128,
+    Cksumtype.SHA384_AES256: _SHA384AES256,
     Cksumtype.HMAC_MD5: _HMACMD5
 }
 
@@ -549,6 +679,8 @@ def cf2(enctype, key1, key2, pepper1, pepper2):
         out = ''
         count = 1
         while len(out) < l:
+            if key.enctype == Enctype.DES3:
+                p = prf(key, chr(count) + pepper)
             out += prf(key, chr(count) + pepper)
             count += 1
         return out[:l]
@@ -673,6 +805,122 @@ if __name__ == '__main__':
     k = cf2(Enctype.DES3, k1, k2, 'a', 'b')
     assert(k.contents == kb)
 
+    # AES128-SHA256 and AES256-SHA384 string-to-key
+    string = 'password'
+    salt = h('10DF9DD783E5BC8ACEA1730E74355F61') + 'ATHENA.MIT.EDUraeburn'
+    kb = h('089BCA48B105EA6EA77CA5D2F39DC5E7')
+    k = string_to_key(Enctype.AES128_SHA256, string, salt)
+    assert(k.contents == kb)
+    k = string_to_key(Enctype.AES256_SHA384, string, salt)
+    kb = h('45BD806DBF6A833A9CFFC1C94589A222367A79BC21C413718906E9F578A78467')
+    assert(k.contents == kb)
+
+    # AES128-SHA256 key derivation
+    kb = h('3705D96080C17728A0E800EAB6E0D23C')
+    kbc = h('B31A018A48F54776F403E9A396325DC3')
+    kbe = h('9B197DD1E8C5609D6E67C3E37C62C72E')
+    kbi = h('9FDA0E56AB2D85E1569A688696C26A6C')
+    k = Key(Enctype.AES128_SHA256, kb)
+    dval = _AES128CTS_SHA256.derive_bytes(k, 16, '\x00\x00\x00\x02\x99')
+    assert(dval == kbc)
+    dval = _AES128CTS_SHA256.derive_bytes(k, 16, '\x00\x00\x00\x02\xAA')
+    assert(dval == kbe)
+    dval = _AES128CTS_SHA256.derive_bytes(k, 16, '\x00\x00\x00\x02\x55')
+    assert(dval == kbi)
+
+    # AES256-SHA384 key derivation
+    kb = h('6D404D37FAF79F9DF0D33568D320669800EB4836472EA8A026D16B7182460C52')
+    kbc = h('EF5718BE86CC84963D8BBB5031E9F5C4BA41F28FAF69E73D')
+    kbe = h('56AB22BEE63D82D7BC5227F6773F8EA7A5EB1C825160C38312980C442E5C7E49')
+    kbi = h('69B16514E3CD8E56B82010D5C73012B622C4D00FFC23ED1F')
+    k = Key(Enctype.AES256_SHA384, kb)
+    dval = _AES256CTS_SHA384.derive_bytes(k, 24, '\x00\x00\x00\x02\x99')
+    assert(dval == kbc)
+    dval = _AES256CTS_SHA384.derive_bytes(k, 32, '\x00\x00\x00\x02\xAA')
+    assert(dval == kbe)
+    dval = _AES256CTS_SHA384.derive_bytes(k, 24, '\x00\x00\x00\x02\x55')
+    assert(dval == kbi)
+
+    # AES128-SHA256 encrypt and decrypt
+    kb = h('3705D96080C17728A0E800EAB6E0D23C')
+    plain = ''
+    conf = h('7E5895EAF2672435BAD817F545A37148')
+    keyusage = 2
+    ctxt = h('EF85FB890BB8472F4DAB20394DCA781D'
+             'AD877EDA39D50C870C0D5A0A8E48C718')
+    k = Key(Enctype.AES128_SHA256, kb)
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
+
+    plain = h('000102030405')
+    conf = h('7BCA285E2FD4130FB55B1A5C83BC5B24')
+    ctxt = h('84D7F30754ED987BAB0BF3506BEB09CFB55402CEF7E6877CE99E247E52D16E'
+             'D4421DFDF8976C')
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
+
+    plain = h('000102030405060708090A0B0C0D0E0F')
+    conf = h('56AB21713FF62C0A1457200F6FA9948F')
+    ctxt = h('3517D640F50DDC8AD3628722B3569D2AE07493FA8263254080EA65C1008E8F'
+             'C295FB4852E7D83E1E7C48C37EEBE6B0D3')
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
+
+    plain = h('000102030405060708090A0B0C0D0E0F1011121314')
+    conf = h('A7A4E29A4728CE10664FB64E49AD3FAC')
+    ctxt = h('720F73B18D9859CD6CCB4346115CD336C70F58EDC0C4437C5573544C31C813'
+             'BCE1E6D072C186B39A413C2F92CA9B8334A287FFCBFC')
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
+
+    # AES256-SHA384 encrypt and decrypt
+    kb = h('6D404D37FAF79F9DF0D33568D320669800EB4836472EA8A026D16B7182460C52')
+    plain = ''
+    conf = h('F764E9FA15C276478B2C7D0C4E5F58E4')
+    keyusage = 2
+    ctxt = h('41F53FA5BFE7026D91FAF9BE959195A058707273A96A40F0A01960621AC612'
+             '748B9BBFBE7EB4CE3C')
+    k = Key(Enctype.AES256_SHA384, kb)
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
+
+    plain = h('000102030405')
+    conf = h('B80D3251C1F6471494256FFE712D0B9A')
+    ctxt = h('4ED7B37C2BCAC8F74F23C1CF07E62BC7B75FB3F637B9F559C7F664F69EAB7B'
+             '6092237526EA0D1F61CB20D69D10F2')
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
+
+    plain = h('000102030405060708090A0B0C0D0E0F')
+    conf = h('53BF8A0D105265D4E276428624CE5E63')
+    ctxt = h('BC47FFEC7998EB91E8115CF8D19DAC4BBBE2E163E87DD37F49BECA92027764'
+             'F68CF51F14D798C2273F35DF574D1F932E40C4FF255B36A266')
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
+
+    plain = h('000102030405060708090A0B0C0D0E0F1011121314')
+    conf = h('763E65367E864F02F55153C7E3B58AF1')
+    ctxt = h('40013E2DF58E8751957D2878BCD2D6FE101CCFD556CB1EAE79DB3C3EE86429'
+             'F2B2A602AC86FEF6ECB647D6295FAE077A1FEB517508D2C16B4192E01F62')
+    assert(encrypt(k, keyusage, plain, conf) == ctxt)
+    assert(decrypt(k, keyusage, ctxt) == plain)
+
+    # SHA256-AES128 checksum
+    kb = h('3705D96080C17728A0E800EAB6E0D23C')
+    keyusage = 2
+    plain = h('000102030405060708090A0B0C0D0E0F1011121314')
+    cksum = h('D78367186643D67B411CBA9139FC1DEE')
+    k = Key(Enctype.AES128_SHA256, kb)
+    verify_checksum(Cksumtype.SHA256_AES128, k, keyusage, plain, cksum)
+
+    # SHA384-AES256 checksum
+    kb = h('6D404D37FAF79F9DF0D33568D320669800EB4836472EA8A026D16B7182460C52')
+    keyusage = 2
+    plain = h('000102030405060708090A0B0C0D0E0F1011121314')
+    cksum = h('45EE791567EEFCA37F4AC1E0222DE80D43C3BFA06699672A')
+    k = Key(Enctype.AES256_SHA384, kb)
+    verify_checksum(Cksumtype.SHA384_AES256, k, keyusage, plain, cksum)
+
     # RC4 encrypt and decrypt
     kb = h('68F263DB3FCE15D031C9EAB02D67107A')
     conf = h('37245E73A45FBF72')
@@ -704,3 +952,16 @@ if __name__ == '__main__':
     k2 = string_to_key(Enctype.RC4, 'key2', 'key2')
     k = cf2(Enctype.RC4, k1, k2, 'a', 'b')
     assert(k.contents == kb)
+
+    # AES128-SHA256 PRF
+    kb = h('3705D96080C17728A0E800EAB6E0D23C')
+    pb = h('9D188616F63852FE86915BB840B4A886FF3E6BB0F819B49B893393D393854295')
+    k = Key(Enctype.AES128_SHA256, kb)
+    assert(prf(k, 'test') == pb)
+
+    # AES256-SHA384 PRF
+    kb = h('6D404D37FAF79F9DF0D33568D320669800EB4836472EA8A026D16B7182460C52')
+    pb = h('9801F69A368C2BF675E59521E177D9A07F67EFE1CFDE8D3C8D6F6A0256E3B17D'
+           'B3C1B62AD1B8553360D17367EB1514D2')
+    k = Key(Enctype.AES256_SHA384, kb)
+    assert(prf(k, 'test') == pb)
