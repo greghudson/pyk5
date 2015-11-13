@@ -193,8 +193,8 @@ class _SimplifiedEnctype(_EnctypeProfile):
 
     @classmethod
     def encrypt(cls, key, keyusage, plaintext, confounder):
-        ki = cls.derive(key, pack('>IB', keyusage, 0x55))
-        ke = cls.derive(key, pack('>IB', keyusage, 0xAA))
+        ki = cls.derive(key, pack('>iB', keyusage, 0x55))
+        ke = cls.derive(key, pack('>iB', keyusage, 0xAA))
         if confounder is None:
             confounder = get_random_bytes(cls.blocksize)
         basic_plaintext = confounder + _zeropad(plaintext, cls.padsize)
@@ -203,8 +203,8 @@ class _SimplifiedEnctype(_EnctypeProfile):
 
     @classmethod
     def decrypt(cls, key, keyusage, ciphertext):
-        ki = cls.derive(key, pack('>IB', keyusage, 0x55))
-        ke = cls.derive(key, pack('>IB', keyusage, 0xAA))
+        ki = cls.derive(key, pack('>iB', keyusage, 0x55))
+        ke = cls.derive(key, pack('>iB', keyusage, 0xAA))
         if len(ciphertext) < cls.blocksize + cls.macsize:
             raise ValueError('ciphertext too short')
         basic_ctext, mac = ciphertext[:-cls.macsize], ciphertext[-cls.macsize:]
@@ -360,7 +360,7 @@ class _RC4(_EnctypeProfile):
         # the RFC 4757 rules.  Per the errata, do not map 9 to 8.
         table = {3: 8, 23: 13}
         msusage = table[keyusage] if keyusage in table else keyusage
-        return pack('<I', msusage)
+        return pack('<i', msusage)
 
     @classmethod
     def string_to_key(cls, string, salt, params):
@@ -388,7 +388,7 @@ class _RC4(_EnctypeProfile):
         ok = _mac_equal(cksum, exp_cksum)
         if not ok and keyusage == 9:
             # Try again with usage 8, due to RFC 4757 errata.
-            ki = HMAC.new(key.contents, pack('<I', 8), MD5).digest()
+            ki = HMAC.new(key.contents, pack('<i', 8), MD5).digest()
             exp_cksum = HMAC.new(ki, basic_plaintext, MD5).digest()
             ok = _mac_equal(cksum, exp_cksum)
         if not ok:
@@ -422,7 +422,7 @@ class _SimplifiedChecksum(_ChecksumProfile):
 
     @classmethod
     def checksum(cls, key, keyusage, text):
-        kc = cls.enc.derive(key, pack('>IB', keyusage, 0x99))
+        kc = cls.enc.derive(key, pack('>iB', keyusage, 0x99))
         hmac = HMAC.new(kc.contents, text, cls.enc.hashmod).digest()
         return hmac[:cls.macsize]
 
@@ -499,6 +499,11 @@ class Key(object):
         self.contents = contents
 
 
+def seedsize(enctype):
+    e = _get_enctype_profile(enctype)
+    return e.seedsize
+
+
 def random_to_key(enctype, seed):
     e = _get_enctype_profile(enctype)
     if len(seed) != e.seedsize:
@@ -541,18 +546,19 @@ def verify_checksum(cksumtype, key, keyusage, text, cksum):
     c.verify(key, keyusage, text, cksum)
 
 
+def prfplus(key, pepper, l):
+    # Produce l bytes of output using the RFC 6113 PRF+ function.
+    out = ''
+    count = 1
+    while len(out) < l:
+        out += prf(key, chr(count) + pepper)
+        count += 1
+    return out[:l]
+
+
 def cf2(enctype, key1, key2, pepper1, pepper2):
     # Combine two keys and two pepper strings to produce a result key
     # of type enctype, using the RFC 6113 KRB-FX-CF2 function.
-    def prfplus(key, pepper, l):
-        # Produce l bytes of output using the RFC 6113 PRF+ function.
-        out = ''
-        count = 1
-        while len(out) < l:
-            out += prf(key, chr(count) + pepper)
-            count += 1
-        return out[:l]
-
     e = _get_enctype_profile(enctype)
     return e.random_to_key(_xorbytes(prfplus(key1, pepper1, e.seedsize),
                                      prfplus(key2, pepper2, e.seedsize)))
