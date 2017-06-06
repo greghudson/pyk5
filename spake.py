@@ -1,6 +1,7 @@
 import random
 from ecc import p256, p256_G, p256_order
 from ecc import p521, p521_G, p521_order
+from ecc import ed25519, ed25519_G, ed25519_order
 from crypto import Enctype, Cksumtype, seedsize, random_to_key, string_to_key
 from crypto import make_checksum, prfplus
 from asn1 import _mfield, _ofield, _K5Sequence
@@ -98,9 +99,9 @@ def update_checksum(cksumtype, key, cksum, b):
     return make_checksum(cksumtype, key, KEY_USAGE_SPAKE_TRANSCRIPT, cksum + b)
 
 
-def derive_key(k, Kbytes, cksum, body, n):
-    # XXX draft may change to SPAKEkey and include group number
-    s = 'SPAKEKey' + Kbytes + cksum + body + pack('>I', n)
+def derive_key(k, gnum, Kbytes, cksum, body, n):
+    s = ('SPAKEkey' + pack('>I', gnum) + pack('>I', k.enctype) + Kbytes +
+         cksum + body + pack('>I', n))
     return random_to_key(k.enctype, prfplus(k, s, seedsize(k.enctype)))
 
 
@@ -110,12 +111,8 @@ def vectors(enctype, cksumtype, gnum, ec, order, wbytes, G, M, N,
 
     k = string_to_key(enctype, 'password', 'ATHENA.MIT.EDUraeburn')
 
-# XXX draft may change to include group number
-#    wprf = prfplus(k, 'SPAKEsecret' + pack('>I', gnum), wbytes)
-    wprf = prfplus(k, 'SPAKEsecret', wbytes)
-    if ec is p521:
-        wprf = chr(ord(wprf[0]) & 1) + wprf[1:]
-    w = ec.decode_int(wprf)
+    wprf = prfplus(k, 'SPAKEsecret' + pack('>I', gnum), wbytes)
+    w = ec.decode_int(wprf) % order
 
     print 'key: %s' % hex(k.contents)
     print 'w: %s' % hex(ec.encode_int(w))
@@ -165,10 +162,10 @@ def vectors(enctype, cksumtype, gnum, ec, order, wbytes, G, M, N,
     print 'KDC-REQ-BODY: %s' % hex(body)
 
     Kbytes = ec.encode_point(K)
-    K0 = derive_key(k, Kbytes, cksum, body, 0)
-    K1 = derive_key(k, Kbytes, cksum, body, 1)
-    K2 = derive_key(k, Kbytes, cksum, body, 2)
-    K3 = derive_key(k, Kbytes, cksum, body, 3)
+    K0 = derive_key(k, gnum, Kbytes, cksum, body, 0)
+    K1 = derive_key(k, gnum, Kbytes, cksum, body, 1)
+    K2 = derive_key(k, gnum, Kbytes, cksum, body, 2)
+    K3 = derive_key(k, gnum, Kbytes, cksum, body, 3)
 
     print "K'[0]: %s" % hex(K0.contents)
     print "K'[1]: %s" % hex(K1.contents)
@@ -189,6 +186,13 @@ p521_N = p521.decode_point('0200C7924B9EC017F3094562894336A53C50167B'
                            'A8C5963876880542BC669E494B2532D76C5B53DF'
                            'B349FDF69154B9E0048C58A42E8ED04CEF052A3B'
                            'C349D95575CD25'.decode('hex'))
+
+# From the BoringSSL ed25519 SPAKE code; comments there explain how
+# these points were found.
+ed25519_M = ed25519.decode_point('5ADA7E4BF6DDD9ADB6626D32131C6B5C51A1E347'
+                                 'A3478F53CFCF441B88EED12E'.decode('hex'))
+ed25519_N = ed25519.decode_point('10E3DF0AE37D8E7A99B5FE74B44672103DBDDCBD'
+                                 '06AF680D71329A11693BC778'.decode('hex'))
 
 random.seed(0)
 
@@ -212,7 +216,11 @@ print '\nAES128 P-521'
 vectors(Enctype.AES128, Cksumtype.SHA1_AES128,
         2, p521, p521_order, 66, p521_G, p521_M, p521_N)
 
-print '\nAES128 P-256 skipped challenge'
+print '\nAES128 ed25519'
+vectors(Enctype.AES128, Cksumtype.SHA1_AES128,
+        4, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
+
+print '\nAES128 P-256 skipped support message'
 vectors(Enctype.AES128, Cksumtype.SHA1_AES128,
         1, p256, p256_order, 32, p256_G, p256_M, p256_N, skip_support=True)
 
@@ -224,4 +232,3 @@ T = p256.add(p256.mul(p256_M, w), p256.mul(p256_G, x))
 ch = make_challenge_encoding(2, p256.encode_point(T))
 vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
         2, p521, p521_order, 66, p521_G, p521_M, p521_N, rejected_challenge=ch)
-
