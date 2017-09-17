@@ -1,5 +1,6 @@
 import random
 from ecc import p256, p256_G, p256_order
+from ecc import p384, p384_G, p384_order
 from ecc import p521, p521_G, p521_order
 from ecc import ed25519, ed25519_G, ed25519_order
 from crypto import Enctype, Cksumtype, seedsize, random_to_key, string_to_key
@@ -12,8 +13,8 @@ from pyasn1.codec.der.encoder import encode as der_encode
 from struct import pack
 
 # XXX not assigned
-KEY_USAGE_SPAKE_TRANSCRIPT = -1357
-KEY_USAGE_SPAKE_FACTOR = -1358
+KEY_USAGE_SPAKE_TRANSCRIPT = 65
+KEY_USAGE_SPAKE_FACTOR = 66
 
 class SPAKESecondFactor(_K5Sequence):
     componentType = NamedTypes(
@@ -92,7 +93,7 @@ def make_body_encoding(enctype):
 
 
 def hex(b):
-    return b.encode('hex').upper()
+    return b.encode('hex')
 
 
 def update_checksum(cksumtype, key, cksum, b):
@@ -178,6 +179,13 @@ p256_M = p256.decode_point('02886E2F97ACE46E55BA9DD7242579F2993B64E16EF3DCAB'
 p256_N = p256.decode_point('03D8BBD6C639C62937B04D997F38C3770719C629D7014D49'
                            'A24B4F98BAA1292B49'.decode('hex'))
 
+p384_M = p384.decode_point('030FF0895AE5EBF6187080A82D82B42E2765E3B2F8749C7E'
+                           '05EBA366434B363D3DC36F15314739074D2EB8613FCEEC28'
+                           '53'.decode('hex'))
+p384_N = p384.decode_point('02C72CF2E390853A1C1C4AD816A62FD15824F56078918F43'
+                           'F922CA21518F9C543BB252C5490214CF9AA3F0BAAB4B665C'
+                           '10'.decode('hex'))
+
 p521_M = p521.decode_point('02003F06F38131B2BA2600791E82488E8D20AB88'
                            '9AF753A41806C5DB18D37D85608CFAE06B82E4A7'
                            '2CD744C719193562A653EA1F119EEF9356907EDC'
@@ -187,8 +195,8 @@ p521_N = p521.decode_point('0200C7924B9EC017F3094562894336A53C50167B'
                            'B349FDF69154B9E0048C58A42E8ED04CEF052A3B'
                            'C349D95575CD25'.decode('hex'))
 
-# From the BoringSSL ed25519 SPAKE code; comments there explain how
-# these points were found.
+# From the BoringSSL edwards25519 SPAKE code; comments there explain
+# how these points were found.
 ed25519_M = ed25519.decode_point('5ADA7E4BF6DDD9ADB6626D32131C6B5C51A1E347'
                                  'A3478F53CFCF441B88EED12E'.decode('hex'))
 ed25519_N = ed25519.decode_point('10E3DF0AE37D8E7A99B5FE74B44672103DBDDCBD'
@@ -196,39 +204,44 @@ ed25519_N = ed25519.decode_point('10E3DF0AE37D8E7A99B5FE74B44672103DBDDCBD'
 
 random.seed(0)
 
-print 'DES3 P-256'
+print 'DES3 edwards25519'
 vectors(Enctype.DES3, Cksumtype.SHA1_DES3,
-        1, p256, p256_order, 32, p256_G, p256_M, p256_N)
+        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
 
-print '\nRC4 P-256'
+print '\nRC4 edwards25519'
 vectors(Enctype.RC4, Cksumtype.HMAC_MD5,
-        1, p256, p256_order, 32, p256_G, p256_M, p256_N)
+        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
 
-print '\nAES128 P-256'
+print '\nAES128 edwards25519'
 vectors(Enctype.AES128, Cksumtype.SHA1_AES128,
-        1, p256, p256_order, 32, p256_G, p256_M, p256_N)
+        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
+
+print '\nAES256 edwards25519'
+vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
+        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
 
 print '\nAES256 P-256'
 vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        1, p256, p256_order, 32, p256_G, p256_M, p256_N)
+        2, p256, p256_order, 32, p256_G, p256_M, p256_N)
 
-print '\nAES128 P-521'
-vectors(Enctype.AES128, Cksumtype.SHA1_AES128,
-        2, p521, p521_order, 66, p521_G, p521_M, p521_N)
-
-print '\nAES128 ed25519'
-vectors(Enctype.AES128, Cksumtype.SHA1_AES128,
-        4, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
-
-print '\nAES128 P-256 skipped support message'
-vectors(Enctype.AES128, Cksumtype.SHA1_AES128,
-        1, p256, p256_order, 32, p256_G, p256_M, p256_N, skip_support=True)
-
-print '\nAES256 P-521 with rejected optimistic P-256 challenge'
-k = string_to_key(Enctype.AES256, 'password', 'ATHENA.MIT.EDUraeburn')
-w = p256.decode_int(prfplus(k, 'SPAKEsecret\0\0\0\2', 32))
-x = random.randrange(0, p256_order)
-T = p256.add(p256.mul(p256_M, w), p256.mul(p256_G, x))
-ch = make_challenge_encoding(2, p256.encode_point(T))
+print '\nAES256 P-384'
 vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        2, p521, p521_order, 66, p521_G, p521_M, p521_N, rejected_challenge=ch)
+        3, p384, p384_order, 48, p384_G, p384_M, p384_N)
+
+print '\nAES256 P-521'
+vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
+        4, p521, p521_order, 66, p521_G, p521_M, p521_N)
+
+print '\nAES256 edwards25519 with accepted optimistic challenge'
+vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
+        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N,
+        skip_support=True)
+
+print '\nAES256 P-521 with rejected optimistic edwards25519 challenge'
+k = string_to_key(Enctype.AES256, 'password', 'ATHENA.MIT.EDUraeburn')
+w = ed25519.decode_int(prfplus(k, 'SPAKEsecret\0\0\0\2', 32))
+x = random.randrange(0, ed25519_order)
+T = ed25519.add(ed25519.mul(ed25519_M, w), ed25519.mul(ed25519_G, x))
+ch = make_challenge_encoding(2, ed25519.encode_point(T))
+vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
+        4, p521, p521_order, 66, p521_G, p521_M, p521_N, rejected_challenge=ch)
