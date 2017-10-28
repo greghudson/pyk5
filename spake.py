@@ -1,4 +1,5 @@
 import random
+import sys
 from ecc import p256, p256_G, p256_order
 from ecc import p384, p384_G, p384_order
 from ecc import p521, p521_G, p521_order
@@ -91,9 +92,28 @@ def make_body_encoding(enctype):
     body['etype'][0] = enctype
     return der_encode(body)
 
-
-def hex(b):
-    return b.encode('hex')
+def output(prefix, b):
+    s = b.encode('hex')
+    maxlinelen = 69
+    if len(prefix) + len(s) > maxlinelen:
+        if len(prefix) <= maxlinelen - 64:
+            maxlen = 64
+        elif len(prefix) <= maxlinelen - 32 and len(s) == 64:
+            maxlen = 32
+        elif len(prefix) <= maxlinelen - 48:
+            maxlen = 48
+        elif len(prefix) <= maxlinelen - 20 and len(s) == 40:
+            maxlen = 20
+        elif len(prefix) <= maxlinelen - 32:
+            maxlen = 32
+        else:
+            sys.stderr.write('formatting error!\n')
+            sys.exit(1)
+        while len(s) > maxlen:
+            print prefix + s[:maxlen]
+            s = s[maxlen:]
+            prefix = ' ' * len(prefix)
+    print prefix + s
 
 
 def update_checksum(cksumtype, key, cksum, b):
@@ -106,7 +126,7 @@ def derive_key(k, gnum, Kbytes, cksum, body, n):
     return random_to_key(k.enctype, prfplus(k, s, seedsize(k.enctype)))
 
 
-def vectors(enctype, cksumtype, gnum, ec, order, wbytes, G, M, N,
+def vectors(enctype, cksumtype, gnum, ec, order, cofactor, wbytes, G, M, N,
             skip_support=False, rejected_challenge=None):
     assert not skip_support or not rejected_challenge
 
@@ -115,11 +135,11 @@ def vectors(enctype, cksumtype, gnum, ec, order, wbytes, G, M, N,
     wprf = prfplus(k, 'SPAKEsecret' + pack('>I', gnum), wbytes)
     w = ec.decode_int(wprf) % order
 
-    print 'key: %s' % hex(k.contents)
-    print 'w: %s' % hex(ec.encode_int(w))
+    output('key: ', k.contents)
+    output('w: ', ec.encode_int(w))
 
-    x = random.randrange(0, order)
-    y = random.randrange(0, order)
+    x = random.randrange(0, order) * cofactor
+    y = random.randrange(0, order) * cofactor
     X = ec.mul(G, x)
     Y = ec.mul(G, y)
     T = ec.add(ec.mul(M, w), X)
@@ -129,38 +149,38 @@ def vectors(enctype, cksumtype, gnum, ec, order, wbytes, G, M, N,
     assert K == ec.mul(ec.add(S, ec.neg(ec.mul(N, w))), x)
     assert K == ec.mul(ec.add(T, ec.neg(ec.mul(M, w))), y)
 
-    print 'x: %s' % hex(ec.encode_int(x))
-    print 'y: %s' % hex(ec.encode_int(y))
-    print 'X: %s' % hex(ec.encode_point(X))
-    print 'Y: %s' % hex(ec.encode_point(Y))
-    print 'T: %s' % hex(ec.encode_point(T))
-    print 'S: %s' % hex(ec.encode_point(S))
-    print 'K: %s' % hex(ec.encode_point(K))
+    output('x: ', ec.encode_int(x))
+    output('y: ', ec.encode_int(y))
+    output('X: ', ec.encode_point(X))
+    output('Y: ', ec.encode_point(Y))
+    output('T: ', ec.encode_point(T))
+    output('S: ', ec.encode_point(S))
+    output('K: ', ec.encode_point(K))
 
     cksumlen = len(make_checksum(cksumtype, k, 0, ''))
     cksum = '\0' * cksumlen
 
     if rejected_challenge:
         cksum = update_checksum(cksumtype, k, cksum, rejected_challenge)
-        print 'Optimistic SPAKEChallenge: %s' % hex(rejected_challenge)
-        print 'Checksum after optimist SPAKEChallenge: %s' % hex(cksum)
+        output('Optimistic SPAKEChallenge: ', rejected_challenge)
+        output('Checksum after optimist SPAKEChallenge: ', cksum)
 
     if not skip_support:
         support = make_support_encoding(gnum)
         cksum = update_checksum(cksumtype, k, cksum, support)
-        print 'SPAKESupport: %s' % hex(support)
-        print 'Checksum after SPAKESupport: %s' % hex(cksum)
+        output('SPAKESupport: ', support)
+        output('Checksum after SPAKESupport: ', cksum)
 
     challenge = make_challenge_encoding(gnum, ec.encode_point(T))
     cksum = update_checksum(cksumtype, k, cksum, challenge)
-    print 'SPAKEChallenge: %s' % hex(challenge)
-    print 'Checksum after SPAKEChallenge: %s' % hex(cksum)
+    output('SPAKEChallenge: ', challenge)
+    output('Checksum after SPAKEChallenge: ', cksum)
 
     cksum = update_checksum(cksumtype, k, cksum, ec.encode_point(S))
-    print 'Checksum after pubkey: %s' % hex(cksum)
+    output('Final checksum after pubkey: ', cksum)
 
     body = make_body_encoding(enctype)
-    print 'KDC-REQ-BODY: %s' % hex(body)
+    output('KDC-REQ-BODY: ', body)
 
     Kbytes = ec.encode_point(K)
     K0 = derive_key(k, gnum, Kbytes, cksum, body, 0)
@@ -168,10 +188,10 @@ def vectors(enctype, cksumtype, gnum, ec, order, wbytes, G, M, N,
     K2 = derive_key(k, gnum, Kbytes, cksum, body, 2)
     K3 = derive_key(k, gnum, Kbytes, cksum, body, 3)
 
-    print "K'[0]: %s" % hex(K0.contents)
-    print "K'[1]: %s" % hex(K1.contents)
-    print "K'[2]: %s" % hex(K2.contents)
-    print "K'[3]: %s" % hex(K3.contents)
+    output("K'[0]: ", K0.contents)
+    output("K'[1]: ", K1.contents)
+    output("K'[2]: ", K2.contents)
+    output("K'[3]: ", K3.contents)
 
 
 p256_M = p256.decode_point('02886E2F97ACE46E55BA9DD7242579F2993B64E16EF3DCAB'
@@ -197,51 +217,52 @@ p521_N = p521.decode_point('0200C7924B9EC017F3094562894336A53C50167B'
 
 # From the BoringSSL edwards25519 SPAKE code; comments there explain
 # how these points were found.
-ed25519_M = ed25519.decode_point('5ADA7E4BF6DDD9ADB6626D32131C6B5C51A1E347'
-                                 'A3478F53CFCF441B88EED12E'.decode('hex'))
-ed25519_N = ed25519.decode_point('10E3DF0AE37D8E7A99B5FE74B44672103DBDDCBD'
-                                 '06AF680D71329A11693BC778'.decode('hex'))
+ed25519_M = ed25519.decode_point('D048032C6EA0B6D697DDC2E86BDA85A33ADAC920'
+                                 'F1BF18E1B0C6D166A5CECDAF'.decode('hex'))
+ed25519_N = ed25519.decode_point('D3BFB518F44F3430F29D0C92AF503865A1ED3281'
+                                 'DC69B35DD868BA85F886C4AB'.decode('hex'))
 
 random.seed(0)
 
 print 'DES3 edwards25519'
 vectors(Enctype.DES3, Cksumtype.SHA1_DES3,
-        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
+        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N)
 
 print '\nRC4 edwards25519'
 vectors(Enctype.RC4, Cksumtype.HMAC_MD5,
-        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
+        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N)
 
 print '\nAES128 edwards25519'
 vectors(Enctype.AES128, Cksumtype.SHA1_AES128,
-        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
+        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N)
 
 print '\nAES256 edwards25519'
 vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N)
+        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N)
 
 print '\nAES256 P-256'
 vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        2, p256, p256_order, 32, p256_G, p256_M, p256_N)
+        2, p256, p256_order, 1, 32, p256_G, p256_M, p256_N)
 
 print '\nAES256 P-384'
 vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        3, p384, p384_order, 48, p384_G, p384_M, p384_N)
+        3, p384, p384_order, 1, 48, p384_G, p384_M, p384_N)
 
 print '\nAES256 P-521'
 vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        4, p521, p521_order, 66, p521_G, p521_M, p521_N)
+        4, p521, p521_order, 1, 66, p521_G, p521_M, p521_N)
 
 print '\nAES256 edwards25519 with accepted optimistic challenge'
 vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        1, ed25519, ed25519_order, 32, ed25519_G, ed25519_M, ed25519_N,
+        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N,
         skip_support=True)
 
 print '\nAES256 P-521 with rejected optimistic edwards25519 challenge'
 k = string_to_key(Enctype.AES256, 'password', 'ATHENA.MIT.EDUraeburn')
 w = ed25519.decode_int(prfplus(k, 'SPAKEsecret\0\0\0\2', 32))
-x = random.randrange(0, ed25519_order)
+x = random.randrange(0, ed25519_order) * 8
 T = ed25519.add(ed25519.mul(ed25519_M, w), ed25519.mul(ed25519_G, x))
 ch = make_challenge_encoding(2, ed25519.encode_point(T))
 vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        4, p521, p521_order, 66, p521_G, p521_M, p521_N, rejected_challenge=ch)
+        4, p521, p521_order, 1, 66, p521_G, p521_M, p521_N,
+        rejected_challenge=ch)
