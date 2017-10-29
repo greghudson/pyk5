@@ -44,6 +44,5 @@ display_point('P-256', '1.2.840.10045.3.1.7', 'M', p256, p256_order)
 display_point('P-256', '1.2.840.10045.3.1.7', 'N', p256, p256_order)
 display_point('P-521', '1.3.132.0.35', 'M', p521, p521_order)
 display_point('P-521', '1.3.132.0.35', 'N', p521, p521_order)
-# XXX no OIDs assigned!
-display_point('ed25519', 'ed25519', 'M', ed25519, ed25519_order)
-display_point('ed25519', 'ed25519', 'N', ed25519, ed25519_order)
+display_point('edwards25519', 'edwards25519', 'M', ed25519, ed25519_order)
+display_point('edwards25519', 'edwards25519', 'N', ed25519, ed25519_order)
