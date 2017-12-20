@@ -189,34 +189,43 @@ class Weierstrass(EC):
 
 class Edwards(EC):
     """Implements an Edwards elliptical curve"""
-    def __init__(self, q):
+    def __init__(self, q, a, d):
         self.q = q
-        self.d = -121665 * inv(121666, q)
+        self.a = a
+        self.d = d
         self.i = pow(2, (q - 1) / 4, q)
 
     def identity(self):
         return (0, 1)
 
+    # ax^2 + y^2 = 1 + dx^2y^2
+
     def at_y(self, y):
         """Return the two curve points with the given y coordinate, starting
         with the positive one."""
-        xx = (y * y - 1) * inv(self.d * y * y + 1, self.q)
-        x = pow(xx, (self.q + 3) / 8, self.q)
-        if (x * x - xx) % self.q != 0:
-            x = (x * self.i) % self.q
+        xx = (y * y - 1) * inv(self.d * y * y - self.a, self.q)
+        if self.q % 4 == 3:
+            x = pow(xx, (self.q + 1) // 4, self.q)
+        else:
+            assert self.q % 8 == 5
+            x = pow(xx, (self.q + 3) / 8, self.q)
+            if (x * x - xx) % self.q != 0:
+                x = (x * pow(2, (self.q - 1) / 4, self.q)) % self.q
         if (x & 1) != 0:
             x = self.q - x
         return (x, y), (self.q - x, y)
 
     def is_valid(self, p):
         x, y = p
-        return (-x * x + y * y - 1 - self.d * x * x * y * y) % self.q == 0
+        return (self.a * x * x + y * y - 1 -
+                self.d * x * x * y * y) % self.q == 0
 
     def add(self, p1, p2):
         x1, y1 = p1
         x2, y2 = p2
         x3 = (x1 * y2 + x2 * y1) * inv(1 + self.d * x1 * x2 * y1 * y2, self.q)
-        y3 = (y1 * y2 + x1 * x2) * inv(1 - self.d * x1 * x2 * y1 * y2, self.q)
+        y3 = ((y1 * y2 - self.a * x1 * x2) *
+              inv(1 - self.d * x1 * x2 * y1 * y2, self.q))
         return (x3 % self.q, y3 % self.q)
 
     def neg(self, p):
@@ -270,12 +279,12 @@ class Edwards(EC):
             raise Exception('point representation has extra overflow bits')
         xbit = ord(s[-1]) >> 7
         if self.nbytes_point() == self.nbytes_int():
-            # Remove the x bit from the high bit of the first byte.
+            # Remove the x bit from the high bit of the last byte.
             # (XXX does not check that any intermediate bits are 0;
             # irrelevant for 25519 and 448)
             y = self.decode_int(s[:-1] + chr(ord(s[-1]) & 0x7F))
         else:
-            # Remove the first byte.  (XXX does not check that low
+            # Remove the last byte.  (XXX does not check that low
             # seven bits are 0.)
             y = self.decode_int(s[:-1])
         p1, p2 = self.at_y(y)
@@ -286,9 +295,9 @@ class Edwards(EC):
 
     def canon_pointstr(self, s):
         o = self.q.bit_length() % 8
-        # Keep the high bit plus the low o bits of the first byte.
-        mask = ~((0x7F < o) & 0x7F)
-        return chr(ord(s[0]) & mask) + s[1:]
+        # Keep the high bit plus the low o bits of the last byte.
+        mask = ~((0x7F << o) & 0x7F)
+        return s[:-1] + chr(ord(s[-1]) & mask)
 
 
 p256_p = 2 ** 256 - 2 ** 224 + 2 ** 192 + 2 ** 96 - 1
@@ -320,9 +329,22 @@ p521_G = p521.decode_point('0200C6858E06B70404E9CD9E3ECB6623'
 p521_order = 0x01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFA51868783BF2F966B7FCC0148F709A5D03BB5C9B8899C47AEBB6FB71E91386409
 
 ed25519_p = 2 ** 255 - 19
-ed25519 = Edwards(ed25519_p)
+ed25519_a = -1
+ed25519_d = 37095705934669439343138083508754565189542113879843219016388785533085940283555
+ed25519 = Edwards(ed25519_p, ed25519_a, ed25519_d)
 ed25519_G = ed25519.decode_point('5866666666666666'
                                  '6666666666666666'
                                  '6666666666666666'
                                  '6666666666666666'.decode('hex'))
 ed25519_order = 2 ** 252 + 27742317777372353535851937790883648493
+
+ed448_p = 2 ** 448 - 2 ** 224 - 1
+ed448_a = 1
+ed448_d = -39081
+ed448 = Edwards(ed448_p, ed448_a, ed448_d)
+ed448_G = ed448.decode_point('14FA30F25B790898ADC8D74E2C13BDFD'
+                             'C4397CE61CFFD33AD7C2A0051E9C7887'
+                             '4098A36C7373EA4B62C7C95637207688'
+                             '24BCB66E71463F6900'.decode('hex'))
+ed448_order = (2 ** 446 -
+               0x8335dc163bb124b65129c96fde933d8d723a70aadc873d6d54a7bb0d)

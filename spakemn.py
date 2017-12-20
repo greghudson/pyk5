@@ -1,5 +1,5 @@
-from ecc import p256, p521, ed25519
-from ecc import p256_order, p521_order, ed25519_order
+from ecc import p256, p384, p521, ed25519, ed448
+from ecc import p256_order, p384_order, p521_order, ed25519_order, ed448_order
 from Crypto.Hash import SHA256
 
 
@@ -27,7 +27,7 @@ def gen_point(seed, ec, order):
         pointstr = ec.canon_pointstr(bighash(seed, i, ec.nbytes_point()))
         try:
             p = ec.decode_point(pointstr)
-            if ec.mul(p, order) == ec.identity():
+            if p != ec.identity() and ec.mul(p, order) == ec.identity():
                 return pointstr, i
         except Exception:
             pass
@@ -42,7 +42,11 @@ def display_point(ecname, oidstr, which, ec, order):
 
 display_point('P-256', '1.2.840.10045.3.1.7', 'M', p256, p256_order)
 display_point('P-256', '1.2.840.10045.3.1.7', 'N', p256, p256_order)
+display_point('P-384', '1.3.132.0.34', 'M', p384, p384_order)
+display_point('P-384', '1.3.132.0.34', 'N', p384, p384_order)
 display_point('P-521', '1.3.132.0.35', 'M', p521, p521_order)
 display_point('P-521', '1.3.132.0.35', 'N', p521, p521_order)
 display_point('edwards25519', 'edwards25519', 'M', ed25519, ed25519_order)
 display_point('edwards25519', 'edwards25519', 'N', ed25519, ed25519_order)
+display_point('edwards448', 'edwards448', 'M', ed448, ed448_order)
+display_point('edwards448', 'edwards448', 'N', ed448, ed448_order)
