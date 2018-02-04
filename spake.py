@@ -1,21 +1,19 @@
 import random
 import sys
+from asn1 import _mfield, _ofield, _K5Sequence
+from asn1 import EncryptedData, KDCReqBody, NameType, PrincipalName
 from ecc import p256, p256_G, p256_order
 from ecc import p384, p384_G, p384_order
 from ecc import p521, p521_G, p521_order
 from ecc import ed25519, ed25519_G, ed25519_order
-from crypto import Enctype, Cksumtype, seedsize, random_to_key, string_to_key
-from crypto import make_checksum, prfplus
-from asn1 import _mfield, _ofield, _K5Sequence
-from asn1 import EncryptedData, KDCReqBody, NameType, PrincipalName
+from crypto import Enctype, seedsize, random_to_key, string_to_key, prfplus
+from Crypto.Hash import SHA256, SHA384, SHA512
 from pyasn1.type.univ import Integer, OctetString, SequenceOf, Choice
 from pyasn1.type.namedtype import NamedTypes
 from pyasn1.codec.der.encoder import encode as der_encode
 from struct import pack
 
-# XXX not assigned
-KEY_USAGE_SPAKE_TRANSCRIPT = 65
-KEY_USAGE_SPAKE_FACTOR = 66
+KEY_USAGE_SPAKE = 65
 
 class SPAKESecondFactor(_K5Sequence):
     componentType = NamedTypes(
@@ -92,8 +90,18 @@ def make_body_encoding(enctype):
     body['etype'][0] = enctype
     return der_encode(body)
 
+code_output = False
+
 def output(prefix, b):
     s = b.encode('hex')
+    if code_output:
+        s = s.upper()
+        while len(s) > 66:
+            print '      "' + s[:64] + '"'
+            s = s[64:]
+        print '      "' + s + '",'
+        return
+
     maxlinelen = 69
     if len(prefix) + len(s) > maxlinelen:
         if len(prefix) <= maxlinelen - 64:
@@ -107,8 +115,7 @@ def output(prefix, b):
         elif len(prefix) <= maxlinelen - 32:
             maxlen = 32
         else:
-            sys.stderr.write('formatting error!\n')
-            sys.exit(1)
+            raise ValueError('Formatting error')
         while len(s) > maxlen:
             print prefix + s[:maxlen]
             s = s[maxlen:]
@@ -116,27 +123,38 @@ def output(prefix, b):
     print prefix + s
 
 
-def update_checksum(cksumtype, key, cksum, b):
-    return make_checksum(cksumtype, key, KEY_USAGE_SPAKE_TRANSCRIPT, cksum + b)
+def update_thash(hashfn, thash, b):
+    return hashfn.new(thash + b).digest()
 
 
-def derive_key(k, gnum, Kbytes, cksum, body, n):
-    s = ('SPAKEkey' + pack('>I', gnum) + pack('>I', k.enctype) + Kbytes +
-         cksum + body + pack('>I', n))
-    return random_to_key(k.enctype, prfplus(k, s, seedsize(k.enctype)))
+def derive_key(hashfn, gnum, enctype, w, Kbytes, thash, body, n):
+    hashin = ('SPAKEkey' + pack('>I', gnum) + pack('>I', enctype) + w +
+              Kbytes + thash + body + pack('>I', n) + '\1')
+    hashout = hashfn.new(hashin).digest()
+    klen = seedsize(enctype)
+    # There are currently no scenarios where the seedsize exceeds the
+    # hash size.  The protocol handles this situation by incrementing
+    # the block counter (the last byte of hashin) to produce more
+    # blocks, but we don't need to implement that yet.
+    assert len(hashout) >= klen
+    return random_to_key(enctype, hashout[:klen])
 
 
-def vectors(enctype, cksumtype, gnum, ec, order, cofactor, wbytes, G, M, N,
+def vectors(enctype, gnum, ec, order, cofactor, wlen, G, M, N, hashfn,
             skip_support=False, rejected_challenge=None):
     assert not skip_support or not rejected_challenge
 
     k = string_to_key(enctype, 'password', 'ATHENA.MIT.EDUraeburn')
 
-    wprf = prfplus(k, 'SPAKEsecret' + pack('>I', gnum), wbytes)
+    wprf = prfplus(k, 'SPAKEsecret' + pack('>I', gnum), wlen)
     w = ec.decode_int(wprf) % order
 
+    if code_output:
+        print '      /* initial key, w, x, y, T, S, K */'
     output('key: ', k.contents)
-    output('w: ', ec.encode_int(w))
+    output('w (PRF+ output): ', wprf)
+    if not code_output:
+        output('w (reduced multiplier): ', ec.encode_int(w))
 
     x = random.randrange(0, order) * cofactor
     y = random.randrange(0, order) * cofactor
@@ -151,43 +169,48 @@ def vectors(enctype, cksumtype, gnum, ec, order, cofactor, wbytes, G, M, N,
 
     output('x: ', ec.encode_int(x))
     output('y: ', ec.encode_int(y))
-    output('X: ', ec.encode_point(X))
-    output('Y: ', ec.encode_point(Y))
+    if not code_output:
+        output('X: ', ec.encode_point(X))
+        output('Y: ', ec.encode_point(Y))
     output('T: ', ec.encode_point(T))
     output('S: ', ec.encode_point(S))
     output('K: ', ec.encode_point(K))
 
-    cksumlen = len(make_checksum(cksumtype, k, 0, ''))
-    cksum = '\0' * cksumlen
-
-    if rejected_challenge:
-        cksum = update_checksum(cksumtype, k, cksum, rejected_challenge)
+    if rejected_challenge and not code_output:
         output('Optimistic SPAKEChallenge: ', rejected_challenge)
-        output('Checksum after optimist SPAKEChallenge: ', cksum)
+
+    if code_output:
+        print '      /* support, challenge, thash, body */'
 
     if not skip_support:
         support = make_support_encoding(gnum)
-        cksum = update_checksum(cksumtype, k, cksum, support)
         output('SPAKESupport: ', support)
-        output('Checksum after SPAKESupport: ', cksum)
+    else:
+        support = ''
+        if code_output:
+            print '      NULL,'
 
     challenge = make_challenge_encoding(gnum, ec.encode_point(T))
-    cksum = update_checksum(cksumtype, k, cksum, challenge)
+    thash = '\0' * hashfn.digest_size
+    thash = update_thash(hashfn, thash, support + challenge)
     output('SPAKEChallenge: ', challenge)
-    output('Checksum after SPAKEChallenge: ', cksum)
+    if not code_output:
+        output('Transcript hash after challenge: ', thash)
 
-    cksum = update_checksum(cksumtype, k, cksum, ec.encode_point(S))
-    output('Final checksum after pubkey: ', cksum)
+    thash = update_thash(hashfn, thash, ec.encode_point(S))
+    output('Final transcript hash after pubkey: ', thash)
 
     body = make_body_encoding(enctype)
     output('KDC-REQ-BODY: ', body)
 
     Kbytes = ec.encode_point(K)
-    K0 = derive_key(k, gnum, Kbytes, cksum, body, 0)
-    K1 = derive_key(k, gnum, Kbytes, cksum, body, 1)
-    K2 = derive_key(k, gnum, Kbytes, cksum, body, 2)
-    K3 = derive_key(k, gnum, Kbytes, cksum, body, 3)
+    K0 = derive_key(hashfn, gnum, k.enctype, wprf, Kbytes, thash, body, 0)
+    K1 = derive_key(hashfn, gnum, k.enctype, wprf, Kbytes, thash, body, 1)
+    K2 = derive_key(hashfn, gnum, k.enctype, wprf, Kbytes, thash, body, 2)
+    K3 = derive_key(hashfn, gnum, k.enctype, wprf, Kbytes, thash, body, 3)
 
+    if code_output:
+        print "      /* K'[0], K'[1], K'[2], K'[3] */"
     output("K'[0]: ", K0.contents)
     output("K'[1]: ", K1.contents)
     output("K'[2]: ", K2.contents)
@@ -222,40 +245,47 @@ ed25519_M = ed25519.decode_point('D048032C6EA0B6D697DDC2E86BDA85A33ADAC920'
 ed25519_N = ed25519.decode_point('D3BFB518F44F3430F29D0C92AF503865A1ED3281'
                                  'DC69B35DD868BA85F886C4AB'.decode('hex'))
 
+if len(sys.argv) > 1 and sys.argv[1] == 'code':
+    code_output = True
+
 random.seed(0)
 
 print 'DES3 edwards25519'
-vectors(Enctype.DES3, Cksumtype.SHA1_DES3,
-        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N)
+vectors(Enctype.DES3,
+        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N,
+        SHA256)
 
 print '\nRC4 edwards25519'
-vectors(Enctype.RC4, Cksumtype.HMAC_MD5,
-        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N)
+vectors(Enctype.RC4,
+        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N,
+        SHA256)
 
 print '\nAES128 edwards25519'
-vectors(Enctype.AES128, Cksumtype.SHA1_AES128,
-        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N)
+vectors(Enctype.AES128,
+        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N,
+        SHA256)
 
 print '\nAES256 edwards25519'
-vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N)
+vectors(Enctype.AES256,
+        1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N,
+        SHA256)
 
 print '\nAES256 P-256'
-vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        2, p256, p256_order, 1, 32, p256_G, p256_M, p256_N)
+vectors(Enctype.AES256,
+        2, p256, p256_order, 1, 32, p256_G, p256_M, p256_N, SHA256)
 
 print '\nAES256 P-384'
-vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        3, p384, p384_order, 1, 48, p384_G, p384_M, p384_N)
+vectors(Enctype.AES256,
+        3, p384, p384_order, 1, 48, p384_G, p384_M, p384_N, SHA384)
 
 print '\nAES256 P-521'
-vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        4, p521, p521_order, 1, 66, p521_G, p521_M, p521_N)
+vectors(Enctype.AES256,
+        4, p521, p521_order, 1, 66, p521_G, p521_M, p521_N, SHA512)
 
 print '\nAES256 edwards25519 with accepted optimistic challenge'
-vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
+vectors(Enctype.AES256,
         1, ed25519, ed25519_order, 8, 32, ed25519_G, ed25519_M, ed25519_N,
-        skip_support=True)
+        SHA256, skip_support=True)
 
 print '\nAES256 P-521 with rejected optimistic edwards25519 challenge'
 k = string_to_key(Enctype.AES256, 'password', 'ATHENA.MIT.EDUraeburn')
@@ -263,6 +293,6 @@ w = ed25519.decode_int(prfplus(k, 'SPAKEsecret\0\0\0\2', 32))
 x = random.randrange(0, ed25519_order) * 8
 T = ed25519.add(ed25519.mul(ed25519_M, w), ed25519.mul(ed25519_G, x))
 ch = make_challenge_encoding(2, ed25519.encode_point(T))
-vectors(Enctype.AES256, Cksumtype.SHA1_AES256,
-        4, p521, p521_order, 1, 66, p521_G, p521_M, p521_N,
+vectors(Enctype.AES256,
+        4, p521, p521_order, 1, 66, p521_G, p521_M, p521_N, SHA512,
         rejected_challenge=ch)
