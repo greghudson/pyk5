@@ -6,7 +6,8 @@ from ecc import p256, p256_G, p256_order
 from ecc import p384, p384_G, p384_order
 from ecc import p521, p521_G, p521_order
 from ecc import ed25519, ed25519_G, ed25519_order
-from crypto import Enctype, seedsize, random_to_key, string_to_key, prfplus
+from crypto import Enctype, seedsize, random_to_key, string_to_key
+from crypto import prfplus, cf2
 from Crypto.Hash import SHA256, SHA384, SHA512
 from pyasn1.type.univ import Integer, OctetString, SequenceOf, Choice
 from pyasn1.type.namedtype import NamedTypes
@@ -127,17 +128,18 @@ def update_thash(hashfn, thash, b):
     return hashfn.new(thash + b).digest()
 
 
-def derive_key(hashfn, gnum, enctype, w, Kbytes, thash, body, n):
-    hashin = ('SPAKEkey' + pack('>I', gnum) + pack('>I', enctype) + w +
+def derive_key(hashfn, gnum, ikey, w, Kbytes, thash, body, n):
+    hashin = ('SPAKEkey' + pack('>I', gnum) + pack('>I', ikey.enctype) + w +
               Kbytes + thash + body + pack('>I', n) + '\1')
     hashout = hashfn.new(hashin).digest()
-    klen = seedsize(enctype)
+    klen = seedsize(ikey.enctype)
     # There are currently no scenarios where the seedsize exceeds the
     # hash size.  The protocol handles this situation by incrementing
     # the block counter (the last byte of hashin) to produce more
     # blocks, but we don't need to implement that yet.
     assert len(hashout) >= klen
-    return random_to_key(enctype, hashout[:klen])
+    hash_key = random_to_key(ikey.enctype, hashout[:klen])
+    return cf2(ikey.enctype, ikey, hash_key, "SPAKE", "keyderiv")
 
 
 def vectors(enctype, gnum, ec, order, cofactor, wlen, G, M, N, hashfn,
@@ -204,10 +206,10 @@ def vectors(enctype, gnum, ec, order, cofactor, wlen, G, M, N, hashfn,
     output('KDC-REQ-BODY: ', body)
 
     Kbytes = ec.encode_point(K)
-    K0 = derive_key(hashfn, gnum, k.enctype, wprf, Kbytes, thash, body, 0)
-    K1 = derive_key(hashfn, gnum, k.enctype, wprf, Kbytes, thash, body, 1)
-    K2 = derive_key(hashfn, gnum, k.enctype, wprf, Kbytes, thash, body, 2)
-    K3 = derive_key(hashfn, gnum, k.enctype, wprf, Kbytes, thash, body, 3)
+    K0 = derive_key(hashfn, gnum, k, wprf, Kbytes, thash, body, 0)
+    K1 = derive_key(hashfn, gnum, k, wprf, Kbytes, thash, body, 1)
+    K2 = derive_key(hashfn, gnum, k, wprf, Kbytes, thash, body, 2)
+    K3 = derive_key(hashfn, gnum, k, wprf, Kbytes, thash, body, 3)
 
     if code_output:
         print "      /* K'[0], K'[1], K'[2], K'[3] */"
