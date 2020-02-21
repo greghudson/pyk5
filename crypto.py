@@ -40,7 +40,8 @@
 #   - Cipher state only needed for kcmd suite
 #   - Nonstandard enctypes and cksumtypes like des-hmac-sha1
 
-from fractions import gcd
+from math import gcd
+from functools import reduce
 from struct import pack, unpack
 from Crypto.Cipher import AES, DES3, ARC4
 from Crypto.Hash import HMAC, MD4, MD5, SHA
@@ -78,13 +79,13 @@ class InvalidChecksum(ValueError):
 def _zeropad(s, padsize):
     # Return s padded with 0 bytes to a multiple of padsize.
     padlen = (padsize - (len(s) % padsize)) % padsize
-    return s + '\0'*padlen
+    return s + bytes(padlen)
 
 
 def _xorbytes(b1, b2):
     # xor two strings together and return the resulting string.
     assert len(b1) == len(b2)
-    return ''.join(chr(ord(x) ^ ord(y)) for x, y in zip(b1, b2))
+    return bytes([x ^ y for x, y in zip(b1, b2)])
 
 
 def _mac_equal(mac1, mac2):
@@ -93,7 +94,7 @@ def _mac_equal(mac1, mac2):
     assert len(mac1) == len(mac2)
     res = 0
     for x, y in zip(mac1, mac2):
-        res |= ord(x) ^ ord(y)
+        res |= x ^ y
     return res == 0
 
 
@@ -104,18 +105,18 @@ def _nfold(str, nbytes):
     # Rotate the bytes in str to the right by nbits bits.
     def rotate_right(str, nbits):
         nbytes, remain = (nbits//8) % len(str), nbits % 8
-        return ''.join(chr((ord(str[i-nbytes]) >> remain) |
-                           ((ord(str[i-nbytes-1]) << (8-remain)) & 0xff))
-                       for i in xrange(len(str)))
+        return bytes([(str[i-nbytes] >> remain) |
+                      (str[i-nbytes-1] << (8-remain) & 0xff)
+                      for i in range(len(str))])
 
     # Add equal-length strings together with end-around carry.
     def add_ones_complement(str1, str2):
         n = len(str1)
-        v = [ord(a) + ord(b) for a, b in zip(str1, str2)]
+        v = [a + b for a, b in zip(str1, str2)]
         # Propagate carry bits to the left until there aren't any left.
         while any(x & ~0xff for x in v):
-            v = [(v[i-n+1]>>8) + (v[i]&0xff) for i in xrange(n)]
-        return ''.join(chr(x) for x in v)
+            v = [(v[i-n+1]>>8) + (v[i]&0xff) for i in range(n)]
+        return bytes([x for x in v])
 
     # Concatenate copies of str to produce the least common multiple
     # of len(str) and nbytes, rotating each copy of str to the right
@@ -123,29 +124,29 @@ def _nfold(str, nbytes):
     # into slices of length nbytes, and add them together as
     # big-endian ones' complement integers.
     slen = len(str)
-    lcm = nbytes * slen / gcd(nbytes, slen)
-    bigstr = ''.join((rotate_right(str, 13 * i) for i in xrange(lcm / slen)))
-    slices = (bigstr[p:p+nbytes] for p in xrange(0, lcm, nbytes))
+    lcm = nbytes * slen // gcd(nbytes, slen)
+    bigstr = b''.join((rotate_right(str, 13 * i) for i in range(lcm // slen)))
+    slices = (bigstr[p:p+nbytes] for p in range(0, lcm, nbytes))
     return reduce(add_ones_complement, slices)
 
 
 def _is_weak_des_key(keybytes):
-    return keybytes in ('\x01\x01\x01\x01\x01\x01\x01\x01',
-                        '\xFE\xFE\xFE\xFE\xFE\xFE\xFE\xFE',
-                        '\x1F\x1F\x1F\x1F\x0E\x0E\x0E\x0E',
-                        '\xE0\xE0\xE0\xE0\xF1\xF1\xF1\xF1',
-                        '\x01\xFE\x01\xFE\x01\xFE\x01\xFE',
-                        '\xFE\x01\xFE\x01\xFE\x01\xFE\x01',
-                        '\x1F\xE0\x1F\xE0\x0E\xF1\x0E\xF1',
-                        '\xE0\x1F\xE0\x1F\xF1\x0E\xF1\x0E',
-                        '\x01\xE0\x01\xE0\x01\xF1\x01\xF1',
-                        '\xE0\x01\xE0\x01\xF1\x01\xF1\x01',
-                        '\x1F\xFE\x1F\xFE\x0E\xFE\x0E\xFE',
-                        '\xFE\x1F\xFE\x1F\xFE\x0E\xFE\x0E',
-                        '\x01\x1F\x01\x1F\x01\x0E\x01\x0E',
-                        '\x1F\x01\x1F\x01\x0E\x01\x0E\x01',
-                        '\xE0\xFE\xE0\xFE\xF1\xFE\xF1\xFE',
-                        '\xFE\xE0\xFE\xE0\xFE\xF1\xFE\xF1')
+    return keybytes in (b'\x01\x01\x01\x01\x01\x01\x01\x01',
+                        b'\xFE\xFE\xFE\xFE\xFE\xFE\xFE\xFE',
+                        b'\x1F\x1F\x1F\x1F\x0E\x0E\x0E\x0E',
+                        b'\xE0\xE0\xE0\xE0\xF1\xF1\xF1\xF1',
+                        b'\x01\xFE\x01\xFE\x01\xFE\x01\xFE',
+                        b'\xFE\x01\xFE\x01\xFE\x01\xFE\x01',
+                        b'\x1F\xE0\x1F\xE0\x0E\xF1\x0E\xF1',
+                        b'\xE0\x1F\xE0\x1F\xF1\x0E\xF1\x0E',
+                        b'\x01\xE0\x01\xE0\x01\xF1\x01\xF1',
+                        b'\xE0\x01\xE0\x01\xF1\x01\xF1\x01',
+                        b'\x1F\xFE\x1F\xFE\x0E\xFE\x0E\xFE',
+                        b'\xFE\x1F\xFE\x1F\xFE\x0E\xFE\x0E',
+                        b'\x01\x1F\x01\x1F\x01\x0E\x01\x0E',
+                        b'\x1F\x01\x1F\x01\x0E\x01\x0E\x01',
+                        b'\xE0\xFE\xE0\xFE\xF1\xFE\xF1\xFE',
+                        b'\xFE\xE0\xFE\xE0\xFE\xF1\xFE\xF1')
 
 
 class _EnctypeProfile(object):
@@ -184,7 +185,7 @@ class _SimplifiedEnctype(_EnctypeProfile):
         # than the block size as well, and n-folding when the length
         # is equal to the block size is a no-op.
         plaintext = _nfold(constant, cls.blocksize)
-        rndseed = ''
+        rndseed = b''
         while len(rndseed) < cls.seedsize:
             ciphertext = cls.basic_encrypt(key, plaintext)
             rndseed += ciphertext
@@ -225,7 +226,7 @@ class _SimplifiedEnctype(_EnctypeProfile):
         hashval = cls.hashmod.new(string).digest()
         truncated = hashval[:-(len(hashval) % cls.blocksize)]
         # Encrypt the hash with a derived key.
-        kp = cls.derive(key, 'prf')
+        kp = cls.derive(key, b'prf')
         return cls.basic_encrypt(kp, truncated)
 
 
@@ -249,13 +250,13 @@ class _DES3CBC(_SimplifiedEnctype):
                 b &= ~1
                 return b if bin(b & ~1).count('1') % 2 else b | 1
             assert len(seed) == 7
-            firstbytes = [parity(ord(b) & ~1) for b in seed]
-            lastbyte = parity(sum((ord(seed[i])&1) << i+1 for i in xrange(7)))
-            keybytes = ''.join(chr(b) for b in firstbytes + [lastbyte])
+            firstbytes = [parity(b & ~1) for b in seed]
+            lastbyte = parity(sum((seed[i]&1) << i+1 for i in range(7)))
+            keybytes = bytes([b for b in firstbytes + [lastbyte]])
             if _is_weak_des_key(keybytes):
-                keybytes[7] = chr(ord(keybytes[7]) ^ 0xF0)
+                keybytes[7] = bytes([keybytes[7] ^ 0xF0])
             return keybytes
-        
+
         if len(seed) != 21:
             raise ValueError('Wrong seed length')
         k1, k2, k3 = expand(seed[:7]), expand(seed[7:14]), expand(seed[14:])
@@ -263,21 +264,21 @@ class _DES3CBC(_SimplifiedEnctype):
 
     @classmethod
     def string_to_key(cls, string, salt, params):
-        if params is not None and params != '':
+        if params is not None and params != b'':
             raise ValueError('Invalid DES3 string-to-key parameters')
         k = cls.random_to_key(_nfold(string + salt, 21))
-        return cls.derive(k, 'kerberos')
+        return cls.derive(k, b'kerberos')
 
     @classmethod
     def basic_encrypt(cls, key, plaintext):
         assert len(plaintext) % 8 == 0
-        des3 = DES3.new(key.contents, AES.MODE_CBC, '\0' * 8)
+        des3 = DES3.new(key.contents, AES.MODE_CBC, bytes(8))
         return des3.encrypt(plaintext)
 
     @classmethod
     def basic_decrypt(cls, key, ciphertext):
         assert len(ciphertext) % 8 == 0
-        des3 = DES3.new(key.contents, AES.MODE_CBC, '\0' * 8)
+        des3 = DES3.new(key.contents, AES.MODE_CBC, bytes(8))
         return des3.decrypt(ciphertext)
 
 
@@ -290,16 +291,16 @@ class _AESEnctype(_SimplifiedEnctype):
 
     @classmethod
     def string_to_key(cls, string, salt, params):
-        (iterations,) = unpack('>L', params or '\x00\x00\x10\x00')
+        (iterations,) = unpack('>L', params or b'\x00\x00\x10\x00')
         prf = lambda p, s: HMAC.new(p, s, SHA).digest()
         seed = PBKDF2(string, salt, cls.seedsize, iterations, prf)
         tkey = cls.random_to_key(seed)
-        return cls.derive(tkey, 'kerberos')
+        return cls.derive(tkey, b'kerberos')
 
     @classmethod
     def basic_encrypt(cls, key, plaintext):
         assert len(plaintext) >= 16
-        aes = AES.new(key.contents, AES.MODE_CBC, '\0' * 16)
+        aes = AES.new(key.contents, AES.MODE_CBC, bytes(16))
         ctext = aes.encrypt(_zeropad(plaintext, 16))
         if len(plaintext) > 16:
             # Swap the last two ciphertext blocks and truncate the
@@ -315,11 +316,11 @@ class _AESEnctype(_SimplifiedEnctype):
         if len(ciphertext) == 16:
             return aes.decrypt(ciphertext)
         # Split the ciphertext into blocks.  The last block may be partial.
-        cblocks = [ciphertext[p:p+16] for p in xrange(0, len(ciphertext), 16)]
+        cblocks = [ciphertext[p:p+16] for p in range(0, len(ciphertext), 16)]
         lastlen = len(cblocks[-1])
         # CBC-decrypt all but the last two blocks.
-        prev_cblock = '\0' * 16
-        plaintext = ''
+        prev_cblock = bytes(16)
+        plaintext = b''
         for b in cblocks[:-2]:
             plaintext += _xorbytes(aes.decrypt(b), prev_cblock)
             prev_cblock = b
@@ -451,7 +452,7 @@ class _SHA1DES3(_SimplifiedChecksum):
 class _HMACMD5(_ChecksumProfile):
     @classmethod
     def checksum(cls, key, keyusage, text):
-        ksign = HMAC.new(key.contents, 'signaturekey\0', MD5).digest()
+        ksign = HMAC.new(key.contents, b'signaturekey\0', MD5).digest()
         md5hash = MD5.new(_RC4.usage_str(keyusage) + text).digest()
         return HMAC.new(ksign, md5hash, MD5).digest()
 
@@ -548,10 +549,10 @@ def verify_checksum(cksumtype, key, keyusage, text, cksum):
 
 def prfplus(key, pepper, l):
     # Produce l bytes of output using the RFC 6113 PRF+ function.
-    out = ''
+    out = b''
     count = 1
     while len(out) < l:
-        out += prf(key, chr(count) + pepper)
+        out += prf(key, bytes([count]) + pepper)
         count += 1
     return out[:l]
 
@@ -566,13 +567,13 @@ def cf2(enctype, key1, key2, pepper1, pepper2):
 
 if __name__ == '__main__':
     def h(hexstr):
-        return hexstr.decode('hex')
+        return bytes.fromhex(hexstr)
 
     # AES128 encrypt and decrypt
     kb = h('9062430C8CDA3388922E6D6A509F5B7A')
     conf = h('94B491F481485B9A0678CD3C4EA386AD')
     keyusage = 2
-    plain = '9 bytesss'
+    plain = b'9 bytesss'
     ctxt = h('68FB9679601F45C78857B2BF820FD6E53ECA8D42FD4B1D7024A09205ABB7CD2E'
              'C26C355D2F')
     k = Key(Enctype.AES128, kb)
@@ -583,7 +584,7 @@ if __name__ == '__main__':
     kb = h('F1C795E9248A09338D82C3F8D5B567040B0110736845041347235B1404231398')
     conf = h('E45CA518B42E266AD98E165E706FFB60')
     keyusage = 4
-    plain = '30 bytes bytes bytes bytes byt'
+    plain = b'30 bytes bytes bytes bytes byt'
     ctxt = h('D1137A4D634CFECE924DBC3BF6790648BD5CFF7DE0E7B99460211D0DAEF3D79A'
              '295C688858F3B34B9CBD6EEBAE81DAF6B734D4D498B6714F1C1D')
     k = Key(Enctype.AES256, kb)
@@ -593,7 +594,7 @@ if __name__ == '__main__':
     # AES128 checksum
     kb = h('9062430C8CDA3388922E6D6A509F5B7A')
     keyusage = 3
-    plain = 'eight nine ten eleven twelve thirteen'
+    plain = b'eight nine ten eleven twelve thirteen'
     cksum = h('01A4B088D45628F6946614E3')
     k = Key(Enctype.AES128, kb)
     verify_checksum(Cksumtype.SHA1_AES128, k, keyusage, plain, cksum)
@@ -601,22 +602,22 @@ if __name__ == '__main__':
     # AES256 checksum
     kb = h('B1AE4CD8462AFF1677053CC9279AAC30B796FB81CE21474DD3DDBCFEA4EC76D7')
     keyusage = 4
-    plain = 'fourteen'
+    plain = b'fourteen'
     cksum = h('E08739E3279E2903EC8E3836')
     k = Key(Enctype.AES256, kb)
     verify_checksum(Cksumtype.SHA1_AES256, k, keyusage, plain, cksum)
 
     # AES128 string-to-key
-    string = 'password'
-    salt = 'ATHENA.MIT.EDUraeburn'
+    string = b'password'
+    salt = b'ATHENA.MIT.EDUraeburn'
     params = h('00000002')
     kb = h('C651BF29E2300AC27FA469D693BDDA13')
     k = string_to_key(Enctype.AES128, string, salt, params)
     assert(k.contents == kb)
 
     # AES256 string-to-key
-    string = 'X' * 64
-    salt = 'pass phrase equals block size'
+    string = b'X' * 64
+    salt = b'pass phrase equals block size'
     params = h('000004B0')
     kb = h('89ADEE3608DB8BC71F1BFBFE459486B05618B70CBAE22092534E56C553BA4B34')
     k = string_to_key(Enctype.AES256, string, salt, params)
@@ -624,33 +625,33 @@ if __name__ == '__main__':
 
     # AES128 prf
     kb = h('77B39A37A868920F2A51F9DD150C5717')
-    k = string_to_key(Enctype.AES128, 'key1', 'key1')
-    assert(prf(k, '\x01\x61') == kb)
+    k = string_to_key(Enctype.AES128, b'key1', b'key1')
+    assert(prf(k, b'\x01\x61') == kb)
 
     # AES256 prf
     kb = h('0D674DD0F9A6806525A4D92E828BD15A')
-    k = string_to_key(Enctype.AES256, 'key2', 'key2')
-    assert(prf(k, '\x02\x62') == kb)
+    k = string_to_key(Enctype.AES256, b'key2', b'key2')
+    assert(prf(k, b'\x02\x62') == kb)
 
     # AES128 cf2
     kb = h('97DF97E4B798B29EB31ED7280287A92A')
-    k1 = string_to_key(Enctype.AES128, 'key1', 'key1')
-    k2 = string_to_key(Enctype.AES128, 'key2', 'key2')
-    k = cf2(Enctype.AES128, k1, k2, 'a', 'b')
+    k1 = string_to_key(Enctype.AES128, b'key1', b'key1')
+    k2 = string_to_key(Enctype.AES128, b'key2', b'key2')
+    k = cf2(Enctype.AES128, k1, k2, b'a', b'b')
     assert(k.contents == kb)
 
     # AES256 cf2
     kb = h('4D6CA4E629785C1F01BAF55E2E548566B9617AE3A96868C337CB93B5E72B1C7B')
-    k1 = string_to_key(Enctype.AES256, 'key1', 'key1')
-    k2 = string_to_key(Enctype.AES256, 'key2', 'key2')
-    k = cf2(Enctype.AES256, k1, k2, 'a', 'b')
+    k1 = string_to_key(Enctype.AES256, b'key1', b'key1')
+    k2 = string_to_key(Enctype.AES256, b'key2', b'key2')
+    k = cf2(Enctype.AES256, k1, k2, b'a', b'b')
     assert(k.contents == kb)
 
     # DES3 encrypt and decrypt
     kb = h('0DD52094E0F41CECCB5BE510A764B35176E3981332F1E598')
     conf = h('94690A17B2DA3C9B')
     keyusage = 3
-    plain = '13 bytes byte'
+    plain = b'13 bytes byte'
     ctxt = h('839A17081ECBAFBCDC91B88C6955DD3C4514023CF177B77BF0D0177A16F705E8'
              '49CB7781D76A316B193F8D30')
     k = Key(Enctype.DES3, kb)
@@ -658,8 +659,8 @@ if __name__ == '__main__':
     assert(decrypt(k, keyusage, ctxt) == _zeropad(plain, 8))
 
     # DES3 string-to-key
-    string = 'password'
-    salt = 'ATHENA.MIT.EDUraeburn'
+    string = b'password'
+    salt = b'ATHENA.MIT.EDUraeburn'
     kb = h('850BB51358548CD05E86768C313E3BFEF7511937DCF72C3E')
     k = string_to_key(Enctype.DES3, string, salt)
     assert(k.contents == kb)
@@ -667,23 +668,23 @@ if __name__ == '__main__':
     # DES3 checksum
     kb = h('7A25DF8992296DCEDA0E135BC4046E2375B3C14C98FBC162')
     keyusage = 2
-    plain = 'six seven'
+    plain = b'six seven'
     cksum = h('0EEFC9C3E049AABC1BA5C401677D9AB699082BB4')
     k = Key(Enctype.DES3, kb)
     verify_checksum(Cksumtype.SHA1_DES3, k, keyusage, plain, cksum)
 
     # DES3 cf2
     kb = h('E58F9EB643862C13AD38E529313462A7F73E62834FE54A01')
-    k1 = string_to_key(Enctype.DES3, 'key1', 'key1')
-    k2 = string_to_key(Enctype.DES3, 'key2', 'key2')
-    k = cf2(Enctype.DES3, k1, k2, 'a', 'b')
+    k1 = string_to_key(Enctype.DES3, b'key1', b'key1')
+    k2 = string_to_key(Enctype.DES3, b'key2', b'key2')
+    k = cf2(Enctype.DES3, k1, k2, b'a', b'b')
     assert(k.contents == kb)
 
     # RC4 encrypt and decrypt
     kb = h('68F263DB3FCE15D031C9EAB02D67107A')
     conf = h('37245E73A45FBF72')
     keyusage = 4
-    plain = '30 bytes bytes bytes bytes byt'
+    plain = b'30 bytes bytes bytes bytes byt'
     ctxt = h('95F9047C3AD75891C2E9B04B16566DC8B6EB9CE4231AFB2542EF87A7B5A0F260'
              'A99F0460508DE0CECC632D07C354124E46C5D2234EB8')
     k = Key(Enctype.RC4, kb)
@@ -691,7 +692,7 @@ if __name__ == '__main__':
     assert(decrypt(k, keyusage, ctxt) == plain)
 
     # RC4 string-to-key
-    string = 'foo'
+    string = b'foo'
     kb = h('AC8E657F83DF82BEEA5D43BDAF7800CC')
     k = string_to_key(Enctype.RC4, string, None)
     assert(k.contents == kb)
@@ -699,14 +700,14 @@ if __name__ == '__main__':
     # RC4 checksum
     kb = h('F7D3A155AF5E238A0B7A871A96BA2AB2')
     keyusage = 6
-    plain = 'seventeen eighteen nineteen twenty'
+    plain = b'seventeen eighteen nineteen twenty'
     cksum = h('EB38CC97E2230F59DA4117DC5859D7EC')
     k = Key(Enctype.RC4, kb)
     verify_checksum(Cksumtype.HMAC_MD5, k, keyusage, plain, cksum)
 
     # RC4 cf2
     kb = h('24D7F6B6BAE4E5C00D2082C5EBAB3672')
-    k1 = string_to_key(Enctype.RC4, 'key1', 'key1')
-    k2 = string_to_key(Enctype.RC4, 'key2', 'key2')
-    k = cf2(Enctype.RC4, k1, k2, 'a', 'b')
+    k1 = string_to_key(Enctype.RC4, b'key1', b'key1')
+    k2 = string_to_key(Enctype.RC4, b'key2', b'key2')
+    k = cf2(Enctype.RC4, k1, k2, b'a', b'b')
     assert(k.contents == kb)
